@@ -1,0 +1,42 @@
+{
+  "id": 12,
+  "status": 2,
+  "createdAt": "2026-09-28T10:00:00.000Z",
+  "updatedAt": "2026-09-28T10:00:05.000Z",
+  "type": "movie",
+  "is4k": false,
+  "serverId": 0,
+  "profileId": 4,
+  "rootFolder": "/movies",
+  "isAutoRequest": false,
+  "media": {
+    "id": 7,
+    "mediaType": "movie",
+    "tmdbId": 603,
+    "tvdbId": null,
+    "status": 3,
+    "status4k": 1,
+    "serviceId": 0,
+    "serviceId4k": null,
+    "externalServiceId": 42,
+    "externalServiceId4k": null,
+    "downloadStatus": [
+      {
+        "externalId": 42,
+        "estimatedCompletionTime": "2026-09-28T12:34:56.000Z",
+        "mediaType": "movie",
+        "size": 4294967296,
+        "sizeLeft": 1073741823.6,
+        "status": "downloading",
+        "timeLeft": "02:34:56",
+        "title": "Example.Movie.2026.1080p.WEB-DL",
+        "downloadId": "SABnzbd_nzo_1a2b3c"
+      }
+    ],
+    "downloadStatus4k": []
+  },
+  "seasons": [],
+  "requestedBy": { "id": 1, "email": "owner@example.com" },
+  "modifiedBy": { "id": 1, "email": "owner@example.com" },
+  "seasonCount": 0
+}

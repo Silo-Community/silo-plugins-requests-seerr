@@ -84,3 +84,15 @@ func TestMapStatus(t *testing.T) {
 		}
 	}
 }
+
+// Seerr keeps each tier's status on the one media record; a request reads its
+// own tier's.
+func TestMediaStatusReadsTheRequestTier(t *testing.T) {
+	media := MediaInfo{Status: MediaStatusAvailable, Status4K: MediaStatusProcessing}
+	if got := (&MediaRequest{Media: media}).MediaStatus(); got != MediaStatusAvailable {
+		t.Fatalf("HD request: want %d got %d", MediaStatusAvailable, got)
+	}
+	if got := (&MediaRequest{Is4K: true, Media: media}).MediaStatus(); got != MediaStatusProcessing {
+		t.Fatalf("4K request: want %d got %d", MediaStatusProcessing, got)
+	}
+}

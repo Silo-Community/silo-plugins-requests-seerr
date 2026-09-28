@@ -1,0 +1,80 @@
+{
+  "id": 22,
+  "status": 2,
+  "createdAt": "2026-09-28T10:00:00.000Z",
+  "updatedAt": "2026-09-28T10:00:05.000Z",
+  "type": "tv",
+  "is4k": false,
+  "serverId": 0,
+  "profileId": 4,
+  "rootFolder": "/tv",
+  "languageProfileId": 1,
+  "isAutoRequest": false,
+  "media": {
+    "id": 10,
+    "mediaType": "tv",
+    "tmdbId": 1400,
+    "tvdbId": 121362,
+    "status": 3,
+    "status4k": 1,
+    "serviceId": 0,
+    "serviceId4k": null,
+    "externalServiceId": 89,
+    "externalServiceId4k": null,
+    "downloadStatus": [
+      {
+        "externalId": 89,
+        "estimatedCompletionTime": "1970-01-01T00:00:00.000Z",
+        "mediaType": "tv",
+        "size": 9000000000,
+        "sizeLeft": 9000000000,
+        "status": "delay",
+        "timeLeft": "00:00:00",
+        "title": "Example.Show.S03.1080p.WEB-DL",
+        "episode": { "seriesId": 89, "seasonNumber": 3, "episodeNumber": 1, "absoluteEpisodeNumber": 21, "id": 601 }
+      },
+      {
+        "externalId": 89,
+        "estimatedCompletionTime": "1970-01-01T00:00:00.000Z",
+        "mediaType": "tv",
+        "size": 9000000000,
+        "sizeLeft": 9000000000,
+        "status": "delay",
+        "timeLeft": "00:00:00",
+        "title": "Example.Show.S03.1080p.WEB-DL",
+        "episode": { "seriesId": 89, "seasonNumber": 3, "episodeNumber": 2, "absoluteEpisodeNumber": 22, "id": 602 }
+      },
+      {
+        "externalId": 89,
+        "estimatedCompletionTime": "1970-01-01T00:00:00.000Z",
+        "mediaType": "tv",
+        "size": 9000000000,
+        "sizeLeft": 9000000000,
+        "status": "delay",
+        "timeLeft": "00:00:00",
+        "title": "Example.Show.S03.1080p.WEB-DL",
+        "episode": { "seriesId": 89, "seasonNumber": 3, "episodeNumber": 3, "absoluteEpisodeNumber": 23, "id": 603 }
+      },
+      {
+        "externalId": 89,
+        "estimatedCompletionTime": "2026-09-28T13:00:00.000Z",
+        "mediaType": "tv",
+        "size": 1500000000,
+        "sizeLeft": 500000000,
+        "status": "downloading",
+        "timeLeft": "01:00:00",
+        "title": "Example.Show.S02E08.1080p.WEB-DL",
+        "episode": { "seriesId": 89, "seasonNumber": 2, "episodeNumber": 8, "absoluteEpisodeNumber": 18, "id": 518 },
+        "downloadId": "SABnzbd_nzo_7a8b9c"
+      }
+    ],
+    "downloadStatus4k": []
+  },
+  "seasons": [
+    { "id": 40, "seasonNumber": 2, "status": 2 },
+    { "id": 41, "seasonNumber": 3, "status": 2 }
+  ],
+  "requestedBy": { "id": 1, "email": "owner@example.com" },
+  "modifiedBy": { "id": 1, "email": "owner@example.com" },
+  "seasonCount": 3
+}

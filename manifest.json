@@ -37,6 +37,9 @@
       "id": "seerr",
       "display_name": "Seerr",
       "description": "Fulfill content requests through a Seerr (Overseerr/Jellyseerr) instance.",
+      "request_router": {
+        "reports_download_progress": true
+      },
       "config_schema": [
         {
           "key": "connection",

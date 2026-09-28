@@ -1,14 +1,19 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/Silo-Community/silo-plugins-requests-seerr/internal/seerr"
@@ -178,6 +183,42 @@ func TestFulfillEmptyBodyRecoversID(t *testing.T) {
 	}
 }
 
+// A 4K target's external status is the media's status4k, on both the create
+// and the duplicate-recovery paths; the HD tier's status is available here.
+func TestFulfill4KExternalStatusReadsStatus4K(t *testing.T) {
+	for _, dup := range []bool{false, true} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/api/v1/request" && r.Method == http.MethodPost && dup:
+				w.WriteHeader(http.StatusConflict)
+			case r.URL.Path == "/api/v1/request" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusCreated)
+				w.Write([]byte(`{"id":61,"status":2,"is4k":true,"media":{"tmdbId":42,"status":5,"status4k":2}}`))
+			case r.URL.Path == "/api/v1/request" && r.Method == http.MethodGet:
+				w.Write([]byte(`{"results":[{"id":62,"is4k":true,"media":{"tmdbId":42,"status":5,"status4k":3}}]}`))
+			default:
+				http.Error(w, "unexpected", http.StatusNotFound)
+			}
+		}))
+		resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
+			Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "42"}},
+			Qualities:   []*pluginv1.RequestedQuality{{Id: "2160p", Is4K: true}},
+			Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+		})
+		srv.Close()
+		want := "2"
+		if dup {
+			want = "3"
+		}
+		if len(resp.GetTargets()) != 1 {
+			t.Fatalf("dup=%t: want 1 target, got %d", dup, len(resp.GetTargets()))
+		}
+		if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "queued" || tgt.GetExternalStatus() != want {
+			t.Fatalf("dup=%t: want queued with external status %s, got %+v", dup, want, tgt)
+		}
+	}
+}
+
 func TestFulfillZeroTargetsReturnsMessage(t *testing.T) {
 	resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
 		Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "42"}},
@@ -224,6 +265,263 @@ func TestCheckStatusMapsAndSkipsMissingConnection(t *testing.T) {
 	}
 	if got["1080p"] != "downloading" || got["2160p"] != "completed" {
 		t.Fatalf("status mapping wrong: %+v", got)
+	}
+}
+
+func TestCheckStatusCarriesDownloadProgress(t *testing.T) {
+	const hdItem = `{"size":1000,"sizeLeft":250,"status":"downloading","estimatedCompletionTime":"2026-09-28T12:00:00.000Z","downloadId":"hd"}`
+	const uhdItem = `{"size":4000,"sizeLeft":4000,"status":"paused","estimatedCompletionTime":null,"downloadId":"uhd"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/request/5": // HD, downloading
+			w.Write([]byte(`{"id":5,"status":2,"is4k":false,"media":{"status":3,"status4k":3,"downloadStatus":[` + hdItem + `],"downloadStatus4k":[` + uhdItem + `]}}`))
+		case "/api/v1/request/6": // 4K, downloading: reads downloadStatus4k
+			w.Write([]byte(`{"id":6,"status":2,"is4k":true,"media":{"status":3,"status4k":3,"downloadStatus":[` + hdItem + `],"downloadStatus4k":[` + uhdItem + `]}}`))
+		case "/api/v1/request/7": // available: a leftover queue item reports nothing
+			w.Write([]byte(`{"id":7,"status":2,"is4k":false,"media":{"status":5,"downloadStatus":[` + hdItem + `]}}`))
+		case "/api/v1/request/8": // queued, nothing in the queue
+			w.Write([]byte(`{"id":8,"status":2,"is4k":false,"media":{"status":2,"downloadStatus":[],"downloadStatus4k":[]}}`))
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	resp, err := New().CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
+		Request: &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "1"}},
+		Targets: []*pluginv1.TargetRef{
+			{Quality: "hd", ConnectionId: "c1", ExternalId: "5"},
+			{Quality: "uhd", ConnectionId: "c1", ExternalId: "6"},
+			{Quality: "available", ConnectionId: "c1", ExternalId: "7"},
+			{Quality: "idle", ConnectionId: "c1", ExternalId: "8"},
+		},
+		Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+	})
+	if err != nil {
+		t.Fatalf("CheckStatus: %v", err)
+	}
+	byQuality := map[string]*pluginv1.TargetStatus{}
+	for _, st := range resp.GetStatuses() {
+		byQuality[st.GetQuality()] = st
+	}
+	if len(byQuality) != 4 {
+		t.Fatalf("want 4 statuses, got %d", len(byQuality))
+	}
+
+	hd := byQuality["hd"].GetProgress()
+	if hd == nil || hd.GetPhase() != "downloading" || hd.GetBytesTotal() != 1000 || hd.GetBytesLeft() != 250 || hd.GetDownloads() != 1 {
+		t.Fatalf("hd progress: %+v", hd)
+	}
+	if want := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC); !hd.GetEstimatedCompletion().AsTime().Equal(want) {
+		t.Fatalf("hd eta: want %v got %v", want, hd.GetEstimatedCompletion().AsTime())
+	}
+
+	if st := byQuality["uhd"]; st.GetStatus() != "downloading" {
+		t.Fatalf("4K status: want downloading, got %q", st.GetStatus())
+	}
+	uhd := byQuality["uhd"].GetProgress()
+	if uhd == nil || uhd.GetPhase() != "paused" || uhd.GetBytesTotal() != 4000 || uhd.GetBytesLeft() != 4000 || uhd.GetDownloads() != 1 {
+		t.Fatalf("4K progress should come from downloadStatus4k: %+v", uhd)
+	}
+	if uhd.GetEstimatedCompletion() != nil {
+		t.Fatalf("4K eta: want unset, got %v", uhd.GetEstimatedCompletion())
+	}
+
+	if st := byQuality["available"]; st.GetStatus() != "completed" || st.GetProgress() != nil {
+		t.Fatalf("completed target must not carry progress: %+v", st)
+	}
+	if st := byQuality["idle"]; st.GetStatus() != "queued" || st.GetProgress() != nil {
+		t.Fatalf("queued target with an empty queue must not carry progress: %+v", st)
+	}
+}
+
+// A held-back season pack, listed per episode without a downloadId, counts
+// once. Its release title is only a dedupe key and never reaches the host.
+func TestCheckStatusCountsHeldBackPackOnceWithoutSendingItsTitle(t *testing.T) {
+	const title = "Example.Show.S03.1080p.WEB-DL"
+	const pending = `{"size":9000,"sizeLeft":9000,"status":"delay","estimatedCompletionTime":"1970-01-01T00:00:00.000Z","title":"` + title + `"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/request/9" {
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		w.Write([]byte(`{"id":9,"status":2,"is4k":false,"media":{"status":3,"downloadStatus":[` + pending + `,` + pending + `,` + pending + `]}}`))
+	}))
+	defer srv.Close()
+
+	resp, err := New().CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
+		Request:     &pluginv1.RequestDescriptor{MediaType: "tv", ExternalIds: map[string]string{"tmdb": "1"}},
+		Targets:     []*pluginv1.TargetRef{{Quality: "hd", ConnectionId: "c1", ExternalId: "9"}},
+		Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+	})
+	if err != nil {
+		t.Fatalf("CheckStatus: %v", err)
+	}
+	if len(resp.GetStatuses()) != 1 {
+		t.Fatalf("want 1 status, got %d", len(resp.GetStatuses()))
+	}
+	p := resp.GetStatuses()[0].GetProgress()
+	if p == nil || p.GetPhase() != "queued" || p.GetBytesTotal() != 9000 || p.GetBytesLeft() != 9000 || p.GetDownloads() != 1 {
+		t.Fatalf("progress: want queued 9000/9000 over 1 download, got %+v", p)
+	}
+	wire, err := proto.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(wire, []byte(title)) {
+		t.Fatalf("response carries the release title: %s", prototext.Format(resp))
+	}
+}
+
+// Seerr tracks HD and 4K on one media record, in status and status4k. Each
+// target's status, external status and progress come from its own tier, so a
+// 4K target keeps downloading after the HD tier is available, and a 4K-only
+// request (HD tier Unknown) still reads as downloading.
+func TestCheckStatusReadsTheRequestTiersMediaStatus(t *testing.T) {
+	const hdList = `[{"size":1000,"sizeLeft":250,"status":"downloading","estimatedCompletionTime":"2026-09-28T12:00:00.000Z","downloadId":"hd"}]`
+	const uhdList = `[{"size":5000,"sizeLeft":3000,"status":"downloading","estimatedCompletionTime":"2026-09-28T14:00:00.000Z","downloadId":"uhd"}]`
+	cases := []struct {
+		name            string
+		is4k            bool
+		status          int
+		status4k        int
+		hdList, uhdList string
+		wantStatus      string
+		wantTotal       int64 // 0: no progress
+		wantLeft        int64
+	}{
+		{"4k/hd available, 4k processing", true, seerr.MediaStatusAvailable, seerr.MediaStatusProcessing, "[]", uhdList, "downloading", 5000, 3000},
+		{"4k/hd unknown, 4k processing", true, seerr.MediaStatusUnknown, seerr.MediaStatusProcessing, "[]", uhdList, "downloading", 5000, 3000},
+		{"4k/hd processing, 4k available", true, seerr.MediaStatusProcessing, seerr.MediaStatusAvailable, hdList, "[]", "completed", 0, 0},
+		{"hd/hd processing, 4k available", false, seerr.MediaStatusProcessing, seerr.MediaStatusAvailable, hdList, "[]", "downloading", 1000, 250},
+	}
+
+	bodies := map[string]string{}
+	var targets []*pluginv1.TargetRef
+	for i, c := range cases {
+		id := itoa(200 + i)
+		bodies["/api/v1/request/"+id] = fmt.Sprintf(`{"id":%s,"status":%d,"is4k":%t,"media":{"status":%d,"status4k":%d,"downloadStatus":%s,"downloadStatus4k":%s}}`,
+			id, seerr.StatusRequestApproved, c.is4k, c.status, c.status4k, c.hdList, c.uhdList)
+		targets = append(targets, &pluginv1.TargetRef{Quality: c.name, ConnectionId: "c1", ExternalId: id})
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, ok := bodies[r.URL.Path]
+		if !ok {
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	resp, err := New().CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
+		Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "1"}},
+		Targets:     targets,
+		Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+	})
+	if err != nil {
+		t.Fatalf("CheckStatus: %v", err)
+	}
+	byQuality := map[string]*pluginv1.TargetStatus{}
+	for _, st := range resp.GetStatuses() {
+		byQuality[st.GetQuality()] = st
+	}
+	for _, c := range cases {
+		st, ok := byQuality[c.name]
+		if !ok {
+			t.Errorf("%s: no status", c.name)
+			continue
+		}
+		tierStatus := c.status
+		if c.is4k {
+			tierStatus = c.status4k
+		}
+		if st.GetStatus() != c.wantStatus || st.GetExternalStatus() != itoa(tierStatus) {
+			t.Errorf("%s: want %s/%d, got %s/%s", c.name, c.wantStatus, tierStatus, st.GetStatus(), st.GetExternalStatus())
+		}
+		p := st.GetProgress()
+		switch {
+		case c.wantTotal == 0 && p != nil:
+			t.Errorf("%s: want no progress, got %+v", c.name, p)
+		case c.wantTotal != 0 && (p == nil || p.GetPhase() != "downloading" || p.GetBytesTotal() != c.wantTotal || p.GetBytesLeft() != c.wantLeft):
+			t.Errorf("%s: want downloading %d/%d, got %+v", c.name, c.wantLeft, c.wantTotal, p)
+		}
+	}
+}
+
+// An approved request whose media Seerr has at Processing or Partially
+// Available, with nothing in its tier's download list, is downloading without
+// progress. The host polls a downloading target every minute only once it has
+// reported progress, so this keeps an idle target on the regular cadence. The
+// other tier is Available with a download in its list, to show neither its
+// status nor its list is read instead.
+func TestCheckStatusDownloadingWithEmptyQueueReportsNoProgress(t *testing.T) {
+	const otherTier = `[{"size":1000,"sizeLeft":250,"status":"downloading","estimatedCompletionTime":"2026-09-28T12:00:00.000Z","downloadId":"other"}]`
+	type tc struct {
+		name        string
+		is4k        bool
+		mediaStatus int
+		ownList     string // "" leaves the tier's list out of the JSON
+	}
+	var cases []tc
+	for _, is4k := range []bool{false, true} {
+		for _, mediaStatus := range []int{seerr.MediaStatusProcessing, seerr.MediaStatusPartiallyAvailable} {
+			for _, ownList := range []string{"", "[]", "null"} {
+				cases = append(cases, tc{
+					name:        fmt.Sprintf("is4k=%t/media=%d/list=%q", is4k, mediaStatus, ownList),
+					is4k:        is4k,
+					mediaStatus: mediaStatus,
+					ownList:     ownList,
+				})
+			}
+		}
+	}
+
+	bodies := map[string]string{}
+	var targets []*pluginv1.TargetRef
+	for i, c := range cases {
+		id := itoa(100 + i)
+		ownKey, otherKey := "downloadStatus", "downloadStatus4k"
+		status, status4k := c.mediaStatus, seerr.MediaStatusAvailable
+		if c.is4k {
+			ownKey, otherKey = otherKey, ownKey
+			status, status4k = status4k, status
+		}
+		media := fmt.Sprintf(`"status":%d,"status4k":%d,%q:%s`, status, status4k, otherKey, otherTier)
+		if c.ownList != "" {
+			media += fmt.Sprintf(`,%q:%s`, ownKey, c.ownList)
+		}
+		bodies["/api/v1/request/"+id] = fmt.Sprintf(`{"id":%s,"status":%d,"is4k":%t,"media":{%s}}`, id, seerr.StatusRequestApproved, c.is4k, media)
+		targets = append(targets, &pluginv1.TargetRef{Quality: c.name, ConnectionId: "c1", ExternalId: id})
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, ok := bodies[r.URL.Path]
+		if !ok {
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	resp, err := New().CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
+		Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "1"}},
+		Targets:     targets,
+		Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+	})
+	if err != nil {
+		t.Fatalf("CheckStatus: %v", err)
+	}
+	if len(resp.GetStatuses()) != len(cases) {
+		t.Fatalf("want %d statuses, got %d", len(cases), len(resp.GetStatuses()))
+	}
+	for _, st := range resp.GetStatuses() {
+		if st.GetStatus() != "downloading" {
+			t.Errorf("%s: status want downloading, got %q", st.GetQuality(), st.GetStatus())
+		}
+		if st.GetProgress() != nil {
+			t.Errorf("%s: want no progress, got %+v", st.GetQuality(), st.GetProgress())
+		}
 	}
 }
 
@@ -395,7 +693,6 @@ func TestFulfillMappedGrants4KWhenRequestHas4K(t *testing.T) {
 		t.Fatalf("permissions = %d, want %d (incl 4K)", got, want)
 	}
 }
-
 
 func TestFulfillMappedAutoApproveOffGrantsRequestOnly(t *testing.T) {
 	var createBody map[string]any
