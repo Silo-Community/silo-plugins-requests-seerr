@@ -1,0 +1,53 @@
+{
+  "id": 13,
+  "status": 2,
+  "createdAt": "2026-09-28T10:00:00.000Z",
+  "updatedAt": "2026-09-28T10:00:05.000Z",
+  "type": "movie",
+  "is4k": true,
+  "serverId": 1,
+  "profileId": 6,
+  "rootFolder": "/movies-4k",
+  "isAutoRequest": false,
+  "media": {
+    "id": 7,
+    "mediaType": "movie",
+    "tmdbId": 603,
+    "tvdbId": null,
+    "status": 3,
+    "status4k": 3,
+    "serviceId": 0,
+    "serviceId4k": 1,
+    "externalServiceId": 42,
+    "externalServiceId4k": 17,
+    "downloadStatus": [
+      {
+        "externalId": 42,
+        "estimatedCompletionTime": "2026-09-28T12:34:56.000Z",
+        "mediaType": "movie",
+        "size": 4294967296,
+        "sizeLeft": 1073741824,
+        "status": "downloading",
+        "timeLeft": "02:34:56",
+        "title": "Example.Movie.2026.1080p.WEB-DL",
+        "downloadId": "SABnzbd_nzo_1a2b3c"
+      }
+    ],
+    "downloadStatus4k": [
+      {
+        "externalId": 17,
+        "estimatedCompletionTime": null,
+        "mediaType": "movie",
+        "size": 64424509440,
+        "sizeLeft": 48318382080,
+        "status": "paused",
+        "title": "Example.Movie.2026.2160p.UHD.BluRay.REMUX",
+        "downloadId": "8F3C2A1B9D7E6F5A4B3C2D1E0F9A8B7C6D5E4F3A"
+      }
+    ]
+  },
+  "seasons": [],
+  "requestedBy": { "id": 1, "email": "owner@example.com" },
+  "modifiedBy": { "id": 1, "email": "owner@example.com" },
+  "seasonCount": 0
+}

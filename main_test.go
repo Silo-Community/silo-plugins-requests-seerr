@@ -21,4 +21,13 @@ func TestEmbeddedManifestLoads(t *testing.T) {
 	if caps[0].GetType() != "request_router.v1" || caps[0].GetId() != "seerr" {
 		t.Fatalf("capability: want request_router.v1/seerr got %q/%q", caps[0].GetType(), caps[0].GetId())
 	}
+	rr := caps[0].GetRequestRouter()
+	if !rr.GetReportsDownloadProgress() {
+		t.Fatalf("request_router.reports_download_progress: want true")
+	}
+	// Seerr requests are whole-series ("seasons": "all"), so the plugin must
+	// not receive season-only requests.
+	if rr.GetSupportsSeasons() {
+		t.Fatalf("request_router.supports_seasons: want false")
+	}
 }

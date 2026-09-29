@@ -1,0 +1,83 @@
+{
+  "id": 21,
+  "status": 2,
+  "createdAt": "2026-09-28T10:00:00.000Z",
+  "updatedAt": "2026-09-28T10:00:05.000Z",
+  "type": "tv",
+  "is4k": false,
+  "serverId": 0,
+  "profileId": 4,
+  "rootFolder": "/tv",
+  "languageProfileId": 1,
+  "isAutoRequest": false,
+  "media": {
+    "id": 9,
+    "mediaType": "tv",
+    "tmdbId": 1399,
+    "tvdbId": 121361,
+    "status": 3,
+    "status4k": 1,
+    "serviceId": 0,
+    "serviceId4k": null,
+    "externalServiceId": 88,
+    "externalServiceId4k": null,
+    "downloadStatus": [
+      {
+        "externalId": 88,
+        "estimatedCompletionTime": "2026-09-28T13:00:00.000Z",
+        "mediaType": "tv",
+        "size": 12000000000,
+        "sizeLeft": 3000000000,
+        "status": "downloading",
+        "timeLeft": "03:00:00",
+        "title": "Example.Show.S02.1080p.WEB-DL",
+        "episode": { "seriesId": 88, "seasonNumber": 2, "episodeNumber": 1, "absoluteEpisodeNumber": 11, "id": 501 },
+        "downloadId": "C0FFEE00C0FFEE00C0FFEE00C0FFEE00C0FFEE00"
+      },
+      {
+        "externalId": 88,
+        "estimatedCompletionTime": "2026-09-28T13:00:00.000Z",
+        "mediaType": "tv",
+        "size": 12000000000,
+        "sizeLeft": 3000000000,
+        "status": "downloading",
+        "timeLeft": "03:00:00",
+        "title": "Example.Show.S02.1080p.WEB-DL",
+        "episode": { "seriesId": 88, "seasonNumber": 2, "episodeNumber": 2, "absoluteEpisodeNumber": 12, "id": 502 },
+        "downloadId": "C0FFEE00C0FFEE00C0FFEE00C0FFEE00C0FFEE00"
+      },
+      {
+        "externalId": 88,
+        "estimatedCompletionTime": "2026-09-28T13:00:00.000Z",
+        "mediaType": "tv",
+        "size": 12000000000,
+        "sizeLeft": 3000000000,
+        "status": "downloading",
+        "timeLeft": "03:00:00",
+        "title": "Example.Show.S02.1080p.WEB-DL",
+        "episode": { "seriesId": 88, "seasonNumber": 2, "episodeNumber": 3, "absoluteEpisodeNumber": 13, "id": 503 },
+        "downloadId": "C0FFEE00C0FFEE00C0FFEE00C0FFEE00C0FFEE00"
+      },
+      {
+        "externalId": 88,
+        "estimatedCompletionTime": "1970-01-01T00:00:00.000Z",
+        "mediaType": "tv",
+        "size": 1500000000,
+        "sizeLeft": 1500000000,
+        "status": "warning",
+        "timeLeft": "00:00:00",
+        "title": "Example.Show.S01E05.1080p.WEB-DL",
+        "episode": { "seriesId": 88, "seasonNumber": 1, "episodeNumber": 5, "absoluteEpisodeNumber": 5, "id": 405 },
+        "downloadId": "SABnzbd_nzo_4d5e6f"
+      }
+    ],
+    "downloadStatus4k": []
+  },
+  "seasons": [
+    { "id": 30, "seasonNumber": 1, "status": 2 },
+    { "id": 31, "seasonNumber": 2, "status": 2 }
+  ],
+  "requestedBy": { "id": 1, "email": "owner@example.com" },
+  "modifiedBy": { "id": 1, "email": "owner@example.com" },
+  "seasonCount": 2
+}

@@ -14,6 +14,7 @@ import (
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/Silo-Community/silo-plugins-requests-seerr/internal/seerr"
 )
@@ -152,7 +153,7 @@ func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, conn
 	case err == nil && created.ID > 0:
 		t.Status = "queued"
 		t.ExternalId = itoa(created.ID)
-		t.ExternalStatus = itoa(created.Media.Status)
+		t.ExternalStatus = itoa(created.MediaStatus())
 	case err == nil:
 		// 2xx but no usable id (empty body): recover the id from the list,
 		// the same way the duplicate path does. Never emit a queued target
@@ -175,7 +176,7 @@ func recoverExisting(ctx context.Context, client *httpclient.Client, t *pluginv1
 	if found, ferr := seerr.FindExistingRequest(ctx, client, tmdbID, is4k); ferr == nil && found != nil {
 		t.Status = "queued"
 		t.ExternalId = itoa(found.ID)
-		t.ExternalStatus = itoa(found.Media.Status)
+		t.ExternalStatus = itoa(found.MediaStatus())
 		if duplicate {
 			t.Message = "already requested in Seerr"
 		} else {
@@ -194,8 +195,10 @@ func recoverExisting(ctx context.Context, client *httpclient.Client, t *pluginv1
 func itoa(n int) string { return strconv.Itoa(n) }
 
 // CheckStatus probes each target's Seerr request id and maps the status back.
-// Targets whose connection is missing, or whose probe errors, are skipped so one
-// unreachable connection does not blank the whole response.
+// Queued and downloading targets also carry the download progress Seerr last
+// read from its Radarr/Sonarr queue. Targets whose connection is missing, or
+// whose probe errors, are skipped so one unreachable connection does not blank
+// the whole response.
 func (s *Server) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusRequest) (*pluginv1.CheckStatusResponse, error) {
 	// Build one Seerr client per connection up front; the target loop reuses it.
 	byID := make(map[string]*httpclient.Client, len(req.GetConnections()))
@@ -229,14 +232,37 @@ func (s *Server) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusReque
 			}
 			continue // transient errors: skip, retry next cycle
 		}
-		statuses = append(statuses, &pluginv1.TargetStatus{
+		status := seerr.MapStatus(mr.Status, mr.MediaStatus())
+		st := &pluginv1.TargetStatus{
 			Quality:        tref.GetQuality(),
 			ConnectionId:   tref.GetConnectionId(),
-			Status:         seerr.MapStatus(mr.Status, mr.Media.Status),
-			ExternalStatus: itoa(mr.Media.Status),
-		})
+			Status:         status,
+			ExternalStatus: itoa(mr.MediaStatus()),
+		}
+		if status == "queued" || status == "downloading" {
+			st.Progress = downloadProgress(seerr.EvaluateProgress(mr.Downloads()))
+		}
+		statuses = append(statuses, st)
 	}
 	return &pluginv1.CheckStatusResponse{Statuses: statuses}, nil
+}
+
+// downloadProgress converts the aggregate to the wire message. Nil stays nil,
+// which tells the host nothing is in flight.
+func downloadProgress(p *seerr.Progress) *pluginv1.DownloadProgress {
+	if p == nil {
+		return nil
+	}
+	out := &pluginv1.DownloadProgress{
+		Phase:      p.Phase,
+		BytesTotal: p.BytesTotal,
+		BytesLeft:  p.BytesLeft,
+		Downloads:  int32(p.Downloads),
+	}
+	if p.EstimatedCompletion != nil {
+		out.EstimatedCompletion = timestamppb.New(*p.EstimatedCompletion)
+	}
+	return out
 }
 
 // TestConnection verifies the base URL + API key by calling /auth/me. Never
