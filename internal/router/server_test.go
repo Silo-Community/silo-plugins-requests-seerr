@@ -767,15 +767,19 @@ func TestFulfillRequireMappedUserFailsWhenUnmapped(t *testing.T) {
 	}
 }
 
-func TestListConfigOptionsAndValidateAreEmpty(t *testing.T) {
+// With no server picked, Validate has nothing to check, and a Seerr that cannot
+// be reached gives the server selects no dynamic options.
+func TestListConfigOptionsAndValidateWithNoServerPicks(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
 	opts, err := New().ListConfigOptions(context.Background(), &pluginv1.ListConfigOptionsRequest{
-		Connection: conn(t, "c1", "http://s", false),
+		Connection: conn(t, "c1", closed.URL, false),
 	})
 	if err != nil || len(opts.GetOptionsByField()) != 0 {
 		t.Fatalf("want empty options, got %+v err=%v", opts.GetOptionsByField(), err)
 	}
 	val, err := New().Validate(context.Background(), &pluginv1.ValidateRequest{
-		Connection: conn(t, "c1", "http://s", false),
+		Connection: conn(t, "c1", closed.URL, false),
 	})
 	if err != nil || len(val.GetFieldErrors()) != 0 || val.GetFormError() != "" {
 		t.Fatalf("want empty validate, got %+v err=%v", val, err)

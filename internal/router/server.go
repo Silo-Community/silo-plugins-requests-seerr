@@ -122,12 +122,22 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	for _, c := range req.GetConnections() {
 		conn := connectionFromRouter(c)
 		client := httpclient.New(conn.BaseURL, conn.APIKey, nil)
+		servers := newServerLister(client)
 		for _, q := range req.GetQualities() {
 			is4k := q.GetIs4K()
 			if is4k && !conn.Supports4K {
 				continue // this connection does not fulfill 4K
 			}
-			targets = append(targets, s.fulfillOne(ctx, client, conn.ID, q.GetId(), mediaType, tmdbID, is4k, userID))
+			serverID, err := resolveServer(ctx, servers, conn, mediaType, is4k)
+			if err != nil {
+				// Never fall back to Seerr's default server: the admin chose
+				// a server, and sending elsewhere would hide the mistake.
+				targets = append(targets, &pluginv1.FulfillmentTarget{
+					Quality: q.GetId(), ConnectionId: conn.ID, Status: "failed", Message: err.Error(),
+				})
+				continue
+			}
+			targets = append(targets, s.fulfillOne(ctx, client, conn.ID, q.GetId(), mediaType, tmdbID, is4k, userID, serverID))
 		}
 	}
 	if len(targets) == 0 {
@@ -137,9 +147,10 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 }
 
 // fulfillOne submits a single (connection, quality) target.
-func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, connID, quality, mediaType string, tmdbID int, is4k bool, userID int) *pluginv1.FulfillmentTarget {
+// serverID is nil for Seerr's default server for the tier.
+func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, connID, quality, mediaType string, tmdbID int, is4k bool, userID int, serverID *int) *pluginv1.FulfillmentTarget {
 	t := &pluginv1.FulfillmentTarget{Quality: quality, ConnectionId: connID}
-	body := seerr.CreateRequestBody{MediaType: mediaType, MediaID: tmdbID, Is4K: is4k}
+	body := seerr.CreateRequestBody{MediaType: mediaType, MediaID: tmdbID, Is4K: is4k, ServerID: serverID}
 	if mediaType == "tv" {
 		body.Seasons = "all"
 	}
@@ -265,25 +276,62 @@ func downloadProgress(p *seerr.Progress) *pluginv1.DownloadProgress {
 	return out
 }
 
-// TestConnection verifies the base URL + API key by calling /auth/me. Never
-// returns a gRPC error; failure is Ok:false + message.
+// TestConnection verifies the base URL + API key by calling /auth/me, then
+// checks any configured Radarr/Sonarr servers against Seerr's. Never returns a
+// gRPC error; failure is Ok:false + message.
 func (s *Server) TestConnection(ctx context.Context, req *pluginv1.TestConnectionRequest) (*pluginv1.TestConnectionResponse, error) {
 	conn := connectionFromRouter(req.GetConnection())
-	if err := seerr.Me(ctx, httpclient.New(conn.BaseURL, conn.APIKey, nil)); err != nil {
+	client := httpclient.New(conn.BaseURL, conn.APIKey, nil)
+	if err := seerr.Me(ctx, client); err != nil {
 		return &pluginv1.TestConnectionResponse{Ok: false, Message: err.Error()}, nil
+	}
+	fieldErrs, unreachable := configuredServerErrors(ctx, newServerLister(client), conn, true)
+	if msgs := sortedMessages(fieldErrs); len(msgs) > 0 {
+		return &pluginv1.TestConnectionResponse{Ok: false, Message: strings.Join(msgs, "; ")}, nil
+	}
+	if len(unreachable) > 0 {
+		return &pluginv1.TestConnectionResponse{Ok: false, Message: "connected, but could not list Seerr's servers to check " + strings.Join(unreachable, ", ")}, nil
 	}
 	return &pluginv1.TestConnectionResponse{Ok: true, Message: "connection successful"}, nil
 }
 
-// ListConfigOptions returns no dynamic options: the Seerr connection config has
-// no dynamic-options fields. Returned empty (not Unimplemented) so the host's
-// options probe gets a clean answer.
+// ListConfigOptions fills the Radarr/Sonarr server selects from Seerr's own
+// server lists. A Seerr that cannot be reached gets no options, and the form
+// falls back to each field's static "Seerr default" option.
 func (s *Server) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfigOptionsRequest) (*pluginv1.ListConfigOptionsResponse, error) {
-	return &pluginv1.ListConfigOptionsResponse{}, nil
+	conn := connectionFromRouter(req.GetConnection())
+	if strings.TrimSpace(conn.BaseURL) == "" {
+		return &pluginv1.ListConfigOptionsResponse{}, nil
+	}
+	client := httpclient.New(conn.BaseURL, conn.APIKey, nil)
+	return &pluginv1.ListConfigOptionsResponse{OptionsByField: serverOptions(ctx, newServerLister(client))}, nil
 }
 
-// Validate has no cross-field rules to check (the only config field is a
-// boolean). Returned empty so the host's save-time Validate succeeds cleanly.
+// Validate checks the server selects at save time: a value must be a server
+// id, and when Seerr can be reached it must name a server of the field's kind
+// and tier. An unreachable Seerr does not block the save; Fulfill and
+// TestConnection check again.
 func (s *Server) Validate(ctx context.Context, req *pluginv1.ValidateRequest) (*pluginv1.ValidateResponse, error) {
-	return &pluginv1.ValidateResponse{}, nil
+	conn := connectionFromRouter(req.GetConnection())
+	checkSeerr := strings.TrimSpace(conn.BaseURL) != ""
+	var lister *serverLister
+	if checkSeerr {
+		lister = newServerLister(httpclient.New(conn.BaseURL, conn.APIKey, nil))
+	}
+	fieldErrs, _ := configuredServerErrors(ctx, lister, conn, checkSeerr)
+	if len(fieldErrs) == 0 {
+		return &pluginv1.ValidateResponse{}, nil
+	}
+	return &pluginv1.ValidateResponse{FieldErrors: fieldErrs}, nil
+}
+
+// sortedMessages returns the messages of fieldErrs in server-field order.
+func sortedMessages(fieldErrs map[string]string) []string {
+	var out []string
+	for _, f := range serverFields {
+		if m, ok := fieldErrs[f.Key]; ok {
+			out = append(out, m)
+		}
+	}
+	return out
 }

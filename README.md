@@ -35,6 +35,37 @@ invalid key.
   reads `status4k`. A 4K target keeps downloading after the HD copy is
   available.
 
+## Choosing Seerr's Radarr and Sonarr servers
+
+A Seerr with more than one Radarr or Sonarr server sends every request to the
+server it marks as default for that tier, unless the request names another.
+The connection's **Radarr and Sonarr servers** section names one per media type
+and tier:
+
+| Field | Requests it routes |
+| --- | --- |
+| `radarr_server_id` | HD movies |
+| `radarr_4k_server_id` | 4K movies |
+| `sonarr_server_id` | HD series |
+| `sonarr_4k_server_id` | 4K series |
+
+- Each select lists the servers of its kind and tier that Seerr has. **Seerr
+  default** (the value `default`) keeps Seerr's own choice, as before. On a
+  route, it forces Seerr's own choice for that rule.
+- The plugin sends only `serverId`. Seerr applies the chosen server's own
+  quality profile, root folder and tags, and its override rules still run.
+- Silo request routes can override these fields per rule. A rule that matches
+  older movies, say, can send its HD tier to one Radarr server and its 4K tier
+  to another, without a second Seerr. Silo's rule editor shows all four fields
+  on every rule: a Movies rule uses only the Radarr fields and a Series rule
+  only the Sonarr ones, so leave the others on Server default. The labels say
+  which media type each field is for.
+- A server id Seerr does not have, or a 4K server picked for HD (or the
+  reverse), fails that target with a message saying which field is wrong.
+  Seerr would otherwise send the request to its default server without saying
+  so. Saving the connection and **Test connection** check the picks too; a
+  Seerr that cannot be reached does not block saving.
+
 ## Download progress
 
 While a request is queued or downloading, the plugin reports how far its
