@@ -159,19 +159,19 @@ func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, conn
 	}
 
 	created, err := seerr.CreateRequest(ctx, client, body)
-	var se *httpclient.StatusError
+	se, isStatusError := errors.AsType[*httpclient.StatusError](err)
 	switch {
 	case err == nil && created.ID > 0:
 		t.Status = "queued"
 		t.ExternalId = itoa(created.ID)
 		t.ExternalStatus = itoa(created.MediaStatus())
 	case err == nil:
-		// 2xx but no usable id (empty body): recover the id from the list,
+		// 2xx but no usable id (empty body): recover the existing request,
 		// the same way the duplicate path does. Never emit a queued target
 		// with a zero external id.
-		recoverExisting(ctx, client, t, tmdbID, is4k, false)
-	case errors.As(err, &se) && se.StatusCode == http.StatusConflict:
-		recoverExisting(ctx, client, t, tmdbID, is4k, true)
+		recoverExisting(ctx, client, t, mediaType, tmdbID, is4k, false)
+	case isStatusError && se.StatusCode == http.StatusConflict:
+		recoverExisting(ctx, client, t, mediaType, tmdbID, is4k, true)
 	default:
 		t.Status = "failed"
 		t.Message = err.Error()
@@ -179,12 +179,12 @@ func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, conn
 	return t
 }
 
-// recoverExisting resolves an existing Seerr request id by scanning the recent
-// request list, used when a create returned no usable id (empty body) or 409
+// recoverExisting resolves an existing Seerr request id for the title,
+// used when a create returned no usable id (empty body) or 409
 // duplicate. duplicate selects the wording. On no match the target fails with a
 // clear message rather than queuing with a zero external id.
-func recoverExisting(ctx context.Context, client *httpclient.Client, t *pluginv1.FulfillmentTarget, tmdbID int, is4k, duplicate bool) {
-	if found, ferr := seerr.FindExistingRequest(ctx, client, tmdbID, is4k); ferr == nil && found != nil {
+func recoverExisting(ctx context.Context, client *httpclient.Client, t *pluginv1.FulfillmentTarget, mediaType string, tmdbID int, is4k, duplicate bool) {
+	if found, ferr := seerr.FindExistingRequest(ctx, client, mediaType, tmdbID, is4k); ferr == nil && found != nil {
 		t.Status = "queued"
 		t.ExternalId = itoa(found.ID)
 		t.ExternalStatus = itoa(found.MediaStatus())

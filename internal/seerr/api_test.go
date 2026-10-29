@@ -3,9 +3,10 @@ package seerr
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
@@ -37,30 +38,61 @@ func TestCreateRequestSendsBodyAndParsesResponse(t *testing.T) {
 	}
 }
 
-func TestFindExistingRequestMatchesTMDBAnd4K(t *testing.T) {
-	var gotQuery string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.RawQuery
-		w.Write([]byte(`{"results":[
-			{"id":1,"is4k":false,"media":{"tmdbId":42}},
-			{"id":2,"is4k":true,"media":{"tmdbId":42}}
-		]}`))
-	}))
-	defer srv.Close()
-	c := httpclient.New(srv.URL, "k", nil)
-
-	mr, err := FindExistingRequest(context.Background(), c, 42, true)
-	if err != nil {
-		t.Fatalf("FindExistingRequest: %v", err)
-	}
-	if mr.ID != 2 {
-		t.Fatalf("want id 2 (the 4k match), got %d", mr.ID)
-	}
-	if !strings.Contains(gotQuery, "sort=added") {
-		t.Fatalf("want query to pin sort=added, got %q", gotQuery)
-	}
-	if _, err := FindExistingRequest(context.Background(), c, 999, false); err != ErrNotFound {
-		t.Fatalf("want ErrNotFound for unknown tmdb, got %v", err)
+func TestFindExistingRequestFallsBackToRecentRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		detail     string
+		noMatching bool
+	}{
+		{name: "unavailable", status: http.StatusInternalServerError},
+		{name: "malformed", detail: `{"mediaInfo":`},
+		{name: "missing media", detail: `{}`},
+		{name: "missing requests", detail: `{"mediaInfo":{"tmdbId":42,"mediaType":"movie"}}`},
+		{name: "wrong tier", detail: `{"mediaInfo":{"tmdbId":42,"mediaType":"movie","requests":[{"id":3,"is4k":false}]}}`},
+		{name: "wrong media", detail: `{"mediaInfo":{"tmdbId":99,"mediaType":"tv","requests":[{"id":3,"is4k":true}]}}`},
+		{name: "invalid id", detail: `{"mediaInfo":{"tmdbId":42,"mediaType":"movie","requests":[{"id":0,"is4k":true}]}}`},
+		{name: "no valid request", detail: `{}`, noMatching: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/movie/42":
+					if tc.status != 0 {
+						w.WriteHeader(tc.status)
+					}
+					fmt.Fprint(w, tc.detail)
+				case "/api/v1/request":
+					if r.URL.Query().Get("take") != "100" || r.URL.Query().Get("sort") != "added" {
+						t.Errorf("unexpected fallback query: %s", r.URL.RawQuery)
+					}
+					results := []MediaRequest{
+						{ID: 90, Is4K: true, Media: MediaInfo{TMDBID: 42, MediaType: "tv"}},
+						{ID: 91, Is4K: true, Media: MediaInfo{TMDBID: 99, MediaType: "movie"}},
+						{ID: 92, Is4K: false, Media: MediaInfo{TMDBID: 42, MediaType: "movie"}},
+						{ID: 0, Is4K: true, Media: MediaInfo{TMDBID: 42, MediaType: "movie"}},
+					}
+					if !tc.noMatching {
+						results = append(results, MediaRequest{ID: 2, Status: StatusRequestApproved, Is4K: true,
+							Media: MediaInfo{TMDBID: 42, MediaType: "movie"}})
+					}
+					_ = json.NewEncoder(w).Encode(requestPage{Results: results})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			mr, err := FindExistingRequest(t.Context(), httpclient.New(srv.URL, "k", nil), "movie", 42, true)
+			if tc.noMatching {
+				if mr != nil || !errors.Is(err, ErrNotFound) {
+					t.Fatalf("want no match, got request=%v err=%v", mr, err)
+				}
+				return
+			}
+			if err != nil || mr == nil || mr.ID != 2 {
+				t.Fatalf("want matching 4K movie request 2, got request=%v err=%v", mr, err)
+			}
+		})
 	}
 }
 

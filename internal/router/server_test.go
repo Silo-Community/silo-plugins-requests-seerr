@@ -140,7 +140,7 @@ func TestFulfillDuplicateRecoversID(t *testing.T) {
 			w.WriteHeader(http.StatusConflict)
 			w.Write([]byte(`{"message":"already requested"}`))
 		case r.URL.Path == "/api/v1/request" && r.Method == http.MethodGet:
-			w.Write([]byte(`{"results":[{"id":314,"is4k":false,"media":{"tmdbId":42}}]}`))
+			w.Write([]byte(`{"results":[{"id":314,"is4k":false,"media":{"mediaType":"movie","tmdbId":42}}]}`))
 		default:
 			http.Error(w, "unexpected", http.StatusNotFound)
 		}
@@ -163,7 +163,7 @@ func TestFulfillEmptyBodyRecoversID(t *testing.T) {
 		case r.URL.Path == "/api/v1/request" && r.Method == http.MethodPost:
 			w.WriteHeader(http.StatusCreated) // 201 with an empty body: no usable id
 		case r.URL.Path == "/api/v1/request" && r.Method == http.MethodGet:
-			w.Write([]byte(`{"results":[{"id":271,"is4k":false,"media":{"tmdbId":42,"status":3}}]}`))
+			w.Write([]byte(`{"results":[{"id":271,"is4k":false,"media":{"mediaType":"movie","tmdbId":42,"status":3}}]}`))
 		default:
 			http.Error(w, "unexpected", http.StatusNotFound)
 		}
@@ -183,6 +183,69 @@ func TestFulfillEmptyBodyRecoversID(t *testing.T) {
 	}
 }
 
+func TestFulfillRecoversRequestOutsideRecentPage(t *testing.T) {
+	for _, mediaType := range []string{"movie", "series"} {
+		for _, is4k := range []bool{false, true} {
+			for _, createStatus := range []int{http.StatusConflict, http.StatusCreated, http.StatusAccepted} {
+				t.Run(fmt.Sprintf("%s/4k=%t/status=%d", mediaType, is4k, createStatus), func(t *testing.T) {
+					apiType := mediaType
+					if mediaType == "series" {
+						apiType = "tv"
+					}
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						switch {
+						case r.Method == http.MethodPost && r.URL.Path == "/api/v1/request":
+							w.WriteHeader(createStatus)
+							if createStatus == http.StatusAccepted {
+								fmt.Fprint(w, `{"message":"No seasons available to request"}`)
+							}
+						case r.Method == http.MethodGet && r.URL.Path == "/api/v1/"+apiType+"/42":
+							// Detail responses contain every request for the title. The
+							// request entries can omit the enclosing media and be unordered.
+							fmt.Fprintf(w, `{"mediaInfo":{"tmdbId":42,"mediaType":%q,"status":5,"status4k":3,"requests":[
+								{"id":900,"status":3,"is4k":%t},
+								{"id":901,"status":4,"is4k":%t},
+								{"id":902,"status":5,"is4k":%t},
+								{"id":0,"status":2,"is4k":%t},
+								{"id":17,"status":2,"is4k":%t},
+								{"id":18,"status":2,"is4k":%t},
+								{"id":1000,"status":2,"is4k":%t}
+							]}}`, apiType, is4k, is4k, is4k, is4k, is4k, is4k, !is4k)
+						case r.Method == http.MethodGet && r.URL.Path == "/api/v1/request":
+							// The latest 100 requests have no match for this older title.
+							results := make([]seerr.MediaRequest, 100)
+							for i := range results {
+								results[i] = seerr.MediaRequest{ID: 2000 + i, Is4K: is4k, Media: seerr.MediaInfo{TMDBID: 2000 + i}}
+							}
+							_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+						default:
+							http.NotFound(w, r)
+						}
+					}))
+					t.Cleanup(srv.Close)
+
+					resp, err := New().Fulfill(t.Context(), &pluginv1.FulfillRequest{
+						Request:     &pluginv1.RequestDescriptor{MediaType: mediaType, ExternalIds: map[string]string{"tmdb": "42"}},
+						Qualities:   []*pluginv1.RequestedQuality{{Id: "test-tier", Is4K: is4k}},
+						Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+					})
+					if err != nil || len(resp.GetTargets()) != 1 {
+						t.Fatalf("Fulfill: response=%v err=%v", resp, err)
+					}
+					target := resp.GetTargets()[0]
+					wantStatus := "5"
+					if is4k {
+						wantStatus = "3"
+					}
+					if target.GetStatus() != "queued" || target.GetExternalId() != "18" || target.GetExternalStatus() != wantStatus {
+						t.Fatalf("want queued request 18 with tier status %s, got %v", wantStatus, target)
+					}
+				})
+			}
+		}
+	}
+}
+
 // A 4K target's external status is the media's status4k, on both the create
 // and the duplicate-recovery paths; the HD tier's status is available here.
 func TestFulfill4KExternalStatusReadsStatus4K(t *testing.T) {
@@ -193,9 +256,9 @@ func TestFulfill4KExternalStatusReadsStatus4K(t *testing.T) {
 				w.WriteHeader(http.StatusConflict)
 			case r.URL.Path == "/api/v1/request" && r.Method == http.MethodPost:
 				w.WriteHeader(http.StatusCreated)
-				w.Write([]byte(`{"id":61,"status":2,"is4k":true,"media":{"tmdbId":42,"status":5,"status4k":2}}`))
+				w.Write([]byte(`{"id":61,"status":2,"is4k":true,"media":{"mediaType":"movie","tmdbId":42,"status":5,"status4k":2}}`))
 			case r.URL.Path == "/api/v1/request" && r.Method == http.MethodGet:
-				w.Write([]byte(`{"results":[{"id":62,"is4k":true,"media":{"tmdbId":42,"status":5,"status4k":3}}]}`))
+				w.Write([]byte(`{"results":[{"id":62,"is4k":true,"media":{"mediaType":"movie","tmdbId":42,"status":5,"status4k":3}}]}`))
 			default:
 				http.Error(w, "unexpected", http.StatusNotFound)
 			}
