@@ -27,21 +27,63 @@ func GetRequest(ctx context.Context, c *httpclient.Client, id int) (*MediaReques
 	return &out, nil
 }
 
-// FindExistingRequest scans the most recent requests for (tmdbID, is4k). Used on
-// the 409 / empty-body recovery path. Returns ErrNotFound if no match is in the
-// scanned page.
-func FindExistingRequest(ctx context.Context, c *httpclient.Client, tmdbID int, is4k bool) (*MediaRequest, error) {
+// FindExistingRequest looks up the title's requests, regardless of their age.
+// If the detail endpoint fails or has no match, fall back to the recent list.
+func FindExistingRequest(ctx context.Context, c *httpclient.Client, mediaType string, tmdbID int, is4k bool) (*MediaRequest, error) {
+	var details struct {
+		MediaInfo struct {
+			MediaInfo
+			Requests []MediaRequest `json:"requests"`
+		} `json:"mediaInfo"`
+	}
+	if err := c.GetJSON(ctx, fmt.Sprintf("/api/v1/%s/%d", mediaType, tmdbID), &details); err == nil {
+		// Nested requests can omit their media back-reference. The enclosing
+		// record supplies the identity and the status of each quality tier.
+		for i := range details.MediaInfo.Requests {
+			details.MediaInfo.Requests[i].Media = details.MediaInfo.MediaInfo
+		}
+		if found := selectExistingRequest(details.MediaInfo.Requests, mediaType, tmdbID, is4k); found != nil {
+			return found, nil
+		}
+	}
+
 	var page requestPage
 	if err := c.GetJSON(ctx, "/api/v1/request?take=100&sort=added", &page); err != nil {
 		return nil, err
 	}
-	for i := range page.Results {
-		r := page.Results[i]
-		if r.Media.TMDBID == tmdbID && r.Is4K == is4k {
-			return &r, nil
-		}
+	if found := selectExistingRequest(page.Results, mediaType, tmdbID, is4k); found != nil {
+		return found, nil
 	}
 	return nil, ErrNotFound
+}
+
+func selectExistingRequest(requests []MediaRequest, mediaType string, tmdbID int, is4k bool) *MediaRequest {
+	var best *MediaRequest
+	for i := range requests {
+		r := &requests[i]
+		if r.ID <= 0 || r.Media.TMDBID != tmdbID || r.Media.MediaType != mediaType || r.Is4K != is4k {
+			continue
+		}
+		if best == nil || requestPriority(r.Status) > requestPriority(best.Status) ||
+			(requestPriority(r.Status) == requestPriority(best.Status) && r.ID > best.ID) {
+			best = r
+		}
+	}
+	return best
+}
+
+// Prefer active requests over terminal ones, then the newest ID within a state.
+func requestPriority(status int) int {
+	switch status {
+	case StatusRequestPending, StatusRequestApproved:
+		return 3
+	case StatusRequestCompleted:
+		return 2
+	case StatusRequestFailed:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // Me validates the base URL + API key by calling the authenticated /auth/me and
