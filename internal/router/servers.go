@@ -3,12 +3,23 @@ package router
 import (
 	"context"
 	"fmt"
+	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
 
 	"github.com/Silo-Community/silo-plugins-requests-seerr/internal/seerr"
 )
+
+// Optional lookups share a short budget so an unreachable Seerr cannot consume
+// the host's RPC deadline. Reserve half the remaining time for the response.
+func serverLookupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	budget := 10 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		budget = min(budget, time.Until(deadline)/2)
+	}
+	return context.WithTimeout(ctx, budget)
+}
 
 // kindLabel is a service kind as people write it.
 func kindLabel(kind string) string {

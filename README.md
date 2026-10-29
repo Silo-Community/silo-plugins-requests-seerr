@@ -63,8 +63,20 @@ and tier:
 - A server id Seerr does not have, or a 4K server picked for HD (or the
   reverse), fails that target with a message saying which field is wrong.
   Seerr would otherwise send the request to its default server without saying
-  so. Saving the connection and **Test connection** check the picks too; a
-  Seerr that cannot be reached does not block saving.
+  so. Saving the connection checks the picks when Seerr responds; an
+  unreachable Seerr does not block saving. Optional server lookups share a
+  ten-second budget and return earlier when the caller's deadline is shorter.
+- The plugin's `TestConnection` RPC also checks the picks. Silo's current web
+  **Test** button loads the server choices instead, so its success message
+  does not confirm that the selected ids are valid or Seerr is reachable.
+- An existing request is reused only when its stored server id matches an
+  explicit selection. A different or unknown destination fails with a message;
+  changing a route does not move a request already submitted to Seerr.
+- Seerr can reuse an id after a server is deleted. Check the connection and
+  route selections whenever you replace a Radarr or Sonarr server in Seerr.
+- Seerr tracks availability across servers for each quality tier. An already
+  available title is not copied to another server, and requesting a partly
+  requested series on another Sonarr adds only its remaining seasons there.
 
 ## Download progress
 

@@ -61,6 +61,10 @@ type MediaRequest struct {
 	Status int       `json:"status"` // MediaRequestStatus
 	Is4K   bool      `json:"is4k"`
 	Media  MediaInfo `json:"media"`
+
+	// A missing/null serverId means Seerr chose its default at submission.
+	// It cannot confirm a later explicit server selection, including server 0.
+	ServerID *int `json:"serverId"`
 }
 
 // MediaStatus returns the media's status for this request's tier. A 4K-only

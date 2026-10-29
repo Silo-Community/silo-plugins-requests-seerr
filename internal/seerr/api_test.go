@@ -82,7 +82,7 @@ func TestFindExistingRequestFallsBackToRecentRequests(t *testing.T) {
 				}
 			}))
 			t.Cleanup(srv.Close)
-			mr, err := FindExistingRequest(t.Context(), httpclient.New(srv.URL, "k", nil), "movie", 42, true)
+			mr, err := FindExistingRequest(t.Context(), httpclient.New(srv.URL, "k", nil), "movie", 42, true, nil)
 			if tc.noMatching {
 				if mr != nil || !errors.Is(err, ErrNotFound) {
 					t.Fatalf("want no match, got request=%v err=%v", mr, err)

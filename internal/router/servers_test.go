@@ -3,13 +3,18 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -424,4 +429,122 @@ func deref(p *int) any {
 		return nil
 	}
 	return *p
+}
+
+func TestFulfillRecoveryKeepsSelectedServer(t *testing.T) {
+	for _, response := range []struct {
+		name, mediaType string
+		status          int
+	}{
+		{"movie conflict", "movie", http.StatusConflict},
+		{"series already requested", "series", http.StatusAccepted},
+		{"empty create response", "movie", http.StatusCreated},
+	} {
+		for _, destination := range []struct {
+			name, configured string
+			existing, posted any
+			wantOK, mixed    bool
+		}{
+			{name: "same server", configured: "2", existing: 2, posted: float64(2), wantOK: true},
+			{name: "different server", configured: "2", existing: 0, posted: float64(2)},
+			{name: "unknown server", configured: "2", posted: float64(2)},
+			{name: "server zero", configured: "0", existing: 0, posted: float64(0), wantOK: true},
+			{name: "default", configured: "default", existing: 0, wantOK: true},
+			{name: "legacy default", configured: "default", wantOK: true},
+			{name: "mixed servers", configured: "2", existing: 2, posted: float64(2), wantOK: true, mixed: true},
+			{name: "default mixed servers", configured: "default", existing: 2, wantOK: true, mixed: true},
+		} {
+			t.Run(response.name+"/"+destination.name, func(t *testing.T) {
+				mediaType, key := "movie", keyRadarrServer
+				if response.mediaType == "series" {
+					mediaType, key = "tv", keySonarrServer
+				}
+				media := map[string]any{"tmdbId": 42, "mediaType": mediaType, "status": 2}
+				requests := []map[string]any{{"id": 91, "status": 2, "is4k": false, "serverId": destination.existing, "media": media}}
+				if destination.mixed {
+					requests = append(requests, map[string]any{"id": 92, "status": 2, "is4k": false, "serverId": 0, "media": media})
+				}
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case strings.HasPrefix(r.URL.Path, "/api/v1/service/"):
+						_, _ = w.Write([]byte(radarrServers))
+					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/request":
+						var body map[string]any
+						if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+							t.Error(err)
+						}
+						if body["serverId"] != destination.posted {
+							t.Errorf("posted server = %v, want %v", body["serverId"], destination.posted)
+						}
+						w.WriteHeader(response.status)
+						if response.status != http.StatusCreated {
+							_, _ = w.Write([]byte(`{"message":"already requested"}`))
+						}
+					case r.URL.Path == "/api/v1/"+mediaType+"/42":
+						_ = json.NewEncoder(w).Encode(map[string]any{"mediaInfo": map[string]any{
+							"tmdbId": 42, "mediaType": mediaType, "status": 2, "requests": requests,
+						}})
+					case r.URL.Path == "/api/v1/request":
+						_ = json.NewEncoder(w).Encode(map[string]any{"results": requests})
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				defer srv.Close()
+				resp := fulfill(t, response.mediaType, []*pluginv1.RequestedQuality{hd}, serverConn(t, srv.URL, map[string]any{key: destination.configured}))
+				if len(resp.GetTargets()) != 1 {
+					t.Fatalf("want one target, got %v", resp)
+				}
+				target := resp.GetTargets()[0]
+				if destination.wantOK {
+					wantID := "91"
+					if destination.mixed && destination.configured == "default" {
+						wantID = "92"
+					}
+					if target.GetStatus() != "queued" || target.GetExternalId() != wantID {
+						t.Fatalf("want recovered request %s, got %v", wantID, target)
+					}
+				} else if target.GetStatus() != "failed" || target.GetExternalId() != "" || !strings.Contains(target.GetMessage(), "server") {
+					t.Fatalf("unconfirmed destination must fail clearly, got %v", target)
+				}
+			})
+		}
+	}
+}
+
+func TestOptionalServerLookupsReturnBeforeRPCDeadline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	pluginv1.RegisterRequestRouterServer(server, New())
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	conn, err := grpc.NewClient("passthrough:///test", grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client := pluginv1.NewRequestRouterClient(conn)
+	connection := serverConn(t, srv.URL, map[string]any{keyRadarrServer: "2", keySonarrServer: "2"})
+	for _, method := range []string{"validate", "options"} {
+		t.Run(method, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			if method == "validate" {
+				resp, err := client.Validate(ctx, &pluginv1.ValidateRequest{Connection: connection})
+				if err != nil || len(resp.GetFieldErrors()) != 0 {
+					t.Fatalf("unavailable Seerr must allow saving: response=%v err=%v", resp, err)
+				}
+			} else {
+				resp, err := client.ListConfigOptions(ctx, &pluginv1.ListConfigOptionsRequest{Connection: connection})
+				if err != nil || len(resp.GetOptionsByField()) != 0 {
+					t.Fatalf("unavailable Seerr must return fallback options: response=%v err=%v", resp, err)
+				}
+			}
+		})
+	}
 }
