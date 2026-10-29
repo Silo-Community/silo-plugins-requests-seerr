@@ -28,6 +28,7 @@ type MediaInfo struct {
 	Status           int            `json:"status"`   // MediaStatus
 	Status4K         int            `json:"status4k"` // MediaStatus
 	TMDBID           int            `json:"tmdbId"`
+	MediaType        string         `json:"mediaType"`
 	DownloadStatus   []DownloadItem `json:"downloadStatus"`
 	DownloadStatus4K []DownloadItem `json:"downloadStatus4k"`
 }
