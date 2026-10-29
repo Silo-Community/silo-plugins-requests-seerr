@@ -8,15 +8,20 @@ const (
 	PermAutoApprove4K = 32768 // AUTO_APPROVE_4K (verified against Overseerr server/lib/permissions.ts)
 )
 
-// CreateRequestBody is the POST /api/v1/request body. serverId/profileId/
-// rootFolder are intentionally omitted: Seerr default-routes those.
-// UserID is set when attributing the request to a mapped Seerr user.
+// CreateRequestBody is the POST /api/v1/request body. UserID is set when
+// attributing the request to a mapped Seerr user.
+//
+// ServerID is set only when the connection (or a Silo route's override) picks
+// a Radarr/Sonarr server; nil leaves Seerr to use its default server for the
+// tier. It is a pointer because Seerr numbers servers from 0. profileId and
+// rootFolder are not sent: Seerr applies the chosen server's own defaults.
 type CreateRequestBody struct {
 	MediaType string `json:"mediaType"` // "movie" | "tv"
 	MediaID   int    `json:"mediaId"`   // TMDB id
 	Is4K      bool   `json:"is4k"`
 	Seasons   any    `json:"seasons,omitempty"` // "all" for tv; omitted for movie
 	UserID    int    `json:"userId,omitempty"`
+	ServerID  *int   `json:"serverId,omitempty"`
 }
 
 // MediaInfo is the nested media record on a MediaRequest. Seerr tracks the HD
@@ -56,6 +61,10 @@ type MediaRequest struct {
 	Status int       `json:"status"` // MediaRequestStatus
 	Is4K   bool      `json:"is4k"`
 	Media  MediaInfo `json:"media"`
+
+	// A missing/null serverId means Seerr chose its default at submission.
+	// It cannot confirm a later explicit server selection, including server 0.
+	ServerID *int `json:"serverId"`
 }
 
 // MediaStatus returns the media's status for this request's tier. A 4K-only

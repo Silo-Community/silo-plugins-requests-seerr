@@ -29,7 +29,9 @@ func GetRequest(ctx context.Context, c *httpclient.Client, id int) (*MediaReques
 
 // FindExistingRequest looks up the title's requests, regardless of their age.
 // If the detail endpoint fails or has no match, fall back to the recent list.
-func FindExistingRequest(ctx context.Context, c *httpclient.Client, mediaType string, tmdbID int, is4k bool) (*MediaRequest, error) {
+// An explicit server ID requires a matching stored selection; a legacy default
+// cannot establish which server the request was sent to.
+func FindExistingRequest(ctx context.Context, c *httpclient.Client, mediaType string, tmdbID int, is4k bool, serverID *int) (*MediaRequest, error) {
 	var details struct {
 		MediaInfo struct {
 			MediaInfo
@@ -42,7 +44,7 @@ func FindExistingRequest(ctx context.Context, c *httpclient.Client, mediaType st
 		for i := range details.MediaInfo.Requests {
 			details.MediaInfo.Requests[i].Media = details.MediaInfo.MediaInfo
 		}
-		if found := selectExistingRequest(details.MediaInfo.Requests, mediaType, tmdbID, is4k); found != nil {
+		if found := selectExistingRequest(details.MediaInfo.Requests, mediaType, tmdbID, is4k, serverID); found != nil {
 			return found, nil
 		}
 	}
@@ -51,17 +53,20 @@ func FindExistingRequest(ctx context.Context, c *httpclient.Client, mediaType st
 	if err := c.GetJSON(ctx, "/api/v1/request?take=100&sort=added", &page); err != nil {
 		return nil, err
 	}
-	if found := selectExistingRequest(page.Results, mediaType, tmdbID, is4k); found != nil {
+	if found := selectExistingRequest(page.Results, mediaType, tmdbID, is4k, serverID); found != nil {
 		return found, nil
 	}
 	return nil, ErrNotFound
 }
 
-func selectExistingRequest(requests []MediaRequest, mediaType string, tmdbID int, is4k bool) *MediaRequest {
+func selectExistingRequest(requests []MediaRequest, mediaType string, tmdbID int, is4k bool, serverID *int) *MediaRequest {
 	var best *MediaRequest
 	for i := range requests {
 		r := &requests[i]
 		if r.ID <= 0 || r.Media.TMDBID != tmdbID || r.Media.MediaType != mediaType || r.Is4K != is4k {
+			continue
+		}
+		if serverID != nil && (r.ServerID == nil || *r.ServerID != *serverID) {
 			continue
 		}
 		if best == nil || requestPriority(r.Status) > requestPriority(best.Status) ||

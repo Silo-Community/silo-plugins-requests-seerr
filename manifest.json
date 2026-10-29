@@ -7,7 +7,7 @@
     "display_name": "Seerr Requests",
     "summary": "Submit Silo movie and series requests through a Seerr-compatible server.",
     "description_markdown": "Connects Silo to Seerr, including Jellyseerr and Overseerr-compatible deployments. Seerr continues to manage its own Sonarr and Radarr services while the plugin maps Silo request identities, HD and 4K intent, and request status.",
-    "setup_markdown": "Install the plugin and add a Seerr connection in Silo with its base URL and an API key owned by a Seerr administrator or auto-approve user. Choose whether the connection handles 4K and whether requests should be attributed to the API-key owner or mapped to Silo users by email.",
+    "setup_markdown": "Install the plugin and add a Seerr connection in Silo with its base URL and an API key owned by a Seerr administrator or auto-approve user. Choose whether the connection handles 4K and whether requests should be attributed to the API-key owner or mapped to Silo users by email. Optionally, pick which of Seerr's Radarr and Sonarr servers HD and 4K requests go to; Silo request routes can override that choice per rule.",
     "homepage_url": "https://github.com/seerr-team/seerr",
     "source_url": "https://github.com/Silo-Community/silo-plugins-requests-seerr",
     "support_url": "https://github.com/Silo-Community/silo-plugins-requests-seerr/issues",
@@ -44,7 +44,7 @@
         {
           "key": "connection",
           "title": "Seerr",
-          "json_schema": "{\"type\":\"object\",\"properties\":{\"supports_4k\":{\"type\":\"boolean\"},\"requester_mode\":{\"type\":\"string\"},\"auto_approve\":{\"type\":\"boolean\"},\"require_mapped_user\":{\"type\":\"boolean\"}}}",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"supports_4k\":{\"type\":\"boolean\"},\"requester_mode\":{\"type\":\"string\"},\"auto_approve\":{\"type\":\"boolean\"},\"require_mapped_user\":{\"type\":\"boolean\"},\"radarr_server_id\":{\"type\":\"string\"},\"radarr_4k_server_id\":{\"type\":\"string\"},\"sonarr_server_id\":{\"type\":\"string\"},\"sonarr_4k_server_id\":{\"type\":\"string\"}}}",
           "admin_form": {
             "submit_label": "Save connection",
             "fields": [
@@ -100,6 +100,103 @@
                       "mapped"
                     ]
                   }
+                ]
+              },
+              {
+                "key": "radarr_server_id",
+                "label": "Radarr server (movies)",
+                "control": "ADMIN_FORM_CONTROL_SELECT",
+                "default_value": "default",
+                "dynamic_options": true,
+                "description": "The Seerr Radarr server that HD movie requests go to. Ignored for series. Seerr default uses whichever server Seerr marks as default. A chosen server gets its own quality profile, root folder and tags from Seerr. Silo request routes can override this per rule.",
+                "options": [
+                  {
+                    "value": "default",
+                    "label": "Seerr default"
+                  }
+                ]
+              },
+              {
+                "key": "radarr_4k_server_id",
+                "label": "Radarr 4K server (movies)",
+                "control": "ADMIN_FORM_CONTROL_SELECT",
+                "default_value": "default",
+                "dynamic_options": true,
+                "description": "The Seerr 4K Radarr server that 4K movie requests go to. Ignored for series. Seerr default uses whichever server Seerr marks as default. A chosen server gets its own quality profile, root folder and tags from Seerr. Silo request routes can override this per rule.",
+                "options": [
+                  {
+                    "value": "default",
+                    "label": "Seerr default"
+                  }
+                ],
+                "show_when": [
+                  {
+                    "field": "supports_4k",
+                    "equals": [
+                      "true"
+                    ]
+                  }
+                ]
+              },
+              {
+                "key": "sonarr_server_id",
+                "label": "Sonarr server (series)",
+                "control": "ADMIN_FORM_CONTROL_SELECT",
+                "default_value": "default",
+                "dynamic_options": true,
+                "description": "The Seerr Sonarr server that HD series requests go to. Ignored for movies. Seerr default uses whichever server Seerr marks as default. A chosen server gets its own quality profile, root folder and tags from Seerr. Silo request routes can override this per rule.",
+                "options": [
+                  {
+                    "value": "default",
+                    "label": "Seerr default"
+                  }
+                ]
+              },
+              {
+                "key": "sonarr_4k_server_id",
+                "label": "Sonarr 4K server (series)",
+                "control": "ADMIN_FORM_CONTROL_SELECT",
+                "default_value": "default",
+                "dynamic_options": true,
+                "description": "The Seerr 4K Sonarr server that 4K series requests go to. Ignored for movies. Seerr default uses whichever server Seerr marks as default. A chosen server gets its own quality profile, root folder and tags from Seerr. Silo request routes can override this per rule.",
+                "options": [
+                  {
+                    "value": "default",
+                    "label": "Seerr default"
+                  }
+                ],
+                "show_when": [
+                  {
+                    "field": "supports_4k",
+                    "equals": [
+                      "true"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "sections": [
+              {
+                "key": "connection",
+                "title": "Seerr",
+                "field_keys": [
+                  "supports_4k",
+                  "requester_mode",
+                  "auto_approve",
+                  "require_mapped_user"
+                ]
+              },
+              {
+                "key": "servers",
+                "title": "Radarr and Sonarr servers",
+                "description": "Pick which of Seerr's Radarr and Sonarr servers each request goes to. Radarr fields apply to movies and Sonarr fields to series; leave a field on Seerr default to keep Seerr's own choice. In a Silo routing rule, set only the fields for that rule's media type.",
+                "collapsible": true,
+                "collapsed_default": true,
+                "field_keys": [
+                  "radarr_server_id",
+                  "radarr_4k_server_id",
+                  "sonarr_server_id",
+                  "sonarr_4k_server_id"
                 ]
               }
             ]
