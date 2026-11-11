@@ -12,6 +12,9 @@ these plugin settings:
 
 - **Attribute requests to** (`requester_mode`): the API-key owner, or the Seerr
   user matching the Silo requester's email (created if missing).
+- **This Seerr has a separate 4K server** (`supports_4k`): whether a 4K copy
+  is its own request to Seerr's 4K server. See
+  [How requests map](#how-requests-map).
 - **Movies** and **Series**: the Radarr or Sonarr server, quality profile and
   root folder requests get. See
   [Choosing the server, quality profile and root folder](#choosing-the-server-quality-profile-and-root-folder).
@@ -27,29 +30,28 @@ invalid key.
 
 ## How requests map
 
-- Each title becomes **one** standard Seerr request (`is4k: false`), whatever
-  qualities Silo asks for. A Radarr or Sonarr server holds one copy of a title
-  and its quality profile decides the resolution, so one server can serve both
-  HD and 4K: pick a quality profile that allows 4K.
-- When Silo asks for an HD and a 4K copy, both of Silo's targets follow that
+How a title's qualities become Seerr requests depends on **This Seerr has a
+separate 4K server** (`supports_4k`):
+
+- **Off** (the default): each title becomes **one** standard Seerr request
+  (`is4k: false`), whatever qualities Silo asks for. A Radarr or Sonarr server
+  holds one copy of a title and its quality profile decides the resolution, so
+  one server can serve both HD and 4K: pick a quality profile that allows 4K.
+  When Silo asks for an HD and a 4K copy, both of Silo's targets follow that
   one request and complete together.
+- **On**: each quality is its own Seerr request. The 2160p one is sent with
+  `is4k: true` and goes to the Radarr or Sonarr that Seerr marks as 4K, so
+  Seerr tracks both versions of a title. This is what earlier versions did,
+  and a connection that had the switch on keeps working as before.
+
+Turn the switch on only if Seerr has a 4K server: Seerr refuses an
+`is4k: true` request without one.
+
 - `series` → Seerr `mediaType: "tv"` with `seasons: "all"`; movies use
   `mediaType: "movie"`. Media is identified by **TMDB id**.
 - A duplicate (HTTP 409) is treated as already-queued; the plugin recovers the
-  existing Seerr request id so Silo can track it. The existing request keeps
-  the server, profile and folder it was made with.
-
-### Upgrading from 0.1
-
-Earlier versions sent a 2160p quality as a separate `is4k: true` request to
-Seerr's 4K server. That is gone, with the `supports_4k`, `radarr_4k_server_id`
-and `sonarr_4k_server_id` settings; saved values are ignored.
-
-- A Seerr with **one** Radarr/Sonarr needs nothing else: set the quality
-  profile and the failed 4K requests stop.
-- A Seerr with a **separate 4K server** no longer gets requests on it through
-  this plugin. Servers Seerr marks as 4K cannot be picked.
-- 4K requests already submitted keep being tracked to completion.
+  existing Seerr request id of that tier so Silo can track it. The existing
+  request keeps the server, profile and folder it was made with.
 
 ## Choosing the server, quality profile and root folder
 
@@ -65,6 +67,8 @@ others. The connection's **Movies** and **Series** sections name them:
 | `sonarr_server_id` | series | `serverId` |
 | `sonarr_profile_id` | series | `profileId` |
 | `sonarr_root_folder` | series | `rootFolder` |
+| `radarr_4k_server_id`, `radarr_4k_profile_id`, `radarr_4k_root_folder` | 4K movie requests, with a separate 4K server | `serverId`, `profileId`, `rootFolder` |
+| `sonarr_4k_server_id`, `sonarr_4k_profile_id`, `sonarr_4k_root_folder` | 4K series requests, with a separate 4K server | `serverId`, `profileId`, `rootFolder` |
 
 - Each select lists what Seerr has. **Seerr default** (the value `default`)
   keeps Seerr's own choice and sends nothing; its label shows what that
@@ -79,13 +83,15 @@ others. The connection's **Movies** and **Series** sections name them:
   send anime elsewhere.
 - Silo request routes can override these fields per rule. A rule that matches
   a genre, a requester or older titles can pick another profile or folder
-  without a second Seerr. Silo's rule editor shows all six fields on every
+  without a second Seerr. Silo's rule editor shows these fields on every
   rule: a Movies rule uses only the Radarr fields and a Series rule only the
   Sonarr ones, so leave the others on Server default. Silo asks the plugin
-  once per quality tier, so a rule whose HD and 4K destinations differ gets
-  the one that is asked first; give both the same settings.
-- A server Seerr does not have or marks as 4K, or a profile or folder the
-  server does not have, fails the request's targets with a message saying
+  once per quality tier. Without a separate 4K server, a rule whose HD and 4K
+  destinations differ gets the one that is asked first; give both the same
+  settings.
+- A server Seerr does not have, a server of the other tier (a 4K server for
+  standard requests or the reverse), or a profile or folder the server does
+  not have, fails the request's targets with a message saying
   which field is wrong. Seerr would otherwise use its own default without
   saying so. Saving the connection checks the picks when Seerr responds; an
   unreachable Seerr does not block saving. Optional lookups share a ten-second
@@ -143,7 +149,7 @@ override who chooses, like any other select.
 While a request is queued or downloading, the plugin reports how far its
 downloads are: a phase, the bytes left, and the estimated completion time.
 Seerr supplies them on the request's media (`downloadStatus`, or
-`downloadStatus4k` for a 4K request made by an earlier version). Its Download Sync job refreshes them from
+`downloadStatus4k` for a 4K request). Its Download Sync job refreshes them from
 the Radarr and Sonarr queues, every minute by default.
 
 - Turn on **Enable Scan** for each Radarr and Sonarr server configured in

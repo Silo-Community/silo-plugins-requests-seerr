@@ -44,11 +44,19 @@ func mediaTypeAndID(d *pluginv1.RequestDescriptor) (mediaType string, tmdbID int
 }
 
 // userPermissions builds a created Seerr user's Overseerr permission bitfield:
-// everyone may request; AUTO_APPROVE when the connection auto-approves.
-func userPermissions(conn Connection) int {
+// everyone may request; AUTO_APPROVE when the connection auto-approves. A
+// request that sends a 4K request to a separate 4K server also needs
+// REQUEST_4K, and AUTO_APPROVE_4K when the connection auto-approves.
+func userPermissions(conn Connection, sends4K bool) int {
 	bits := seerr.PermRequest
+	if sends4K {
+		bits |= seerr.PermRequest4K
+	}
 	if conn.AutoApprove {
 		bits |= seerr.PermAutoApprove
+		if sends4K {
+			bits |= seerr.PermAutoApprove4K
+		}
 	}
 	return bits
 }
@@ -58,7 +66,7 @@ func userPermissions(conn Connection) int {
 // (missing email or a lookup/create error); the caller decides whether that means
 // admin fallback (userID 0) or a hard request failure. Resolved once per request
 // against the first connection's Seerr.
-func resolveRequesterUserID(ctx context.Context, client *httpclient.Client, conn Connection, email string) (userID int, mapFailed bool) {
+func resolveRequesterUserID(ctx context.Context, client *httpclient.Client, conn Connection, email string, sends4K bool) (userID int, mapFailed bool) {
 	if !conn.Mapped {
 		return 0, false
 	}
@@ -73,7 +81,7 @@ func resolveRequesterUserID(ctx context.Context, client *httpclient.Client, conn
 	if user != nil {
 		return user.ID, false
 	}
-	created, err := seerr.CreateUser(ctx, client, email, userPermissions(conn))
+	created, err := seerr.CreateUser(ctx, client, email, userPermissions(conn, sends4K))
 	if err != nil {
 		log.Printf("seerr: user create failed for %q: %v", email, err)
 		return 0, true
@@ -81,13 +89,19 @@ func resolveRequesterUserID(ctx context.Context, client *httpclient.Client, conn
 	return created.ID, false
 }
 
-// Fulfill submits one standard Seerr request per connection and returns one
-// FulfillmentTarget per requested quality, all following that request. A
-// Radarr or Sonarr server holds one copy of a title, and its quality profile
-// decides the resolution, so the quality tiers are not sent separately. The
-// host records a failed target for a quality it gets no target for, so every
-// requested quality is answered. Per-connection containment: one failing
-// connection never aborts the others.
+// Fulfill submits the request to every connection and returns one
+// FulfillmentTarget per requested quality and connection.
+//
+// A connection whose Seerr has one Radarr or Sonarr for everything gets one
+// standard request: that server holds one copy of a title and its quality
+// profile decides the resolution, so every requested quality follows that
+// request. The host records a failed target for a quality it gets no target
+// for, so each one is answered.
+//
+// A connection whose Seerr has a separate 4K server (supports_4k) gets one
+// request per quality, and the 4K one goes to the 4K server.
+//
+// One failing connection or quality never aborts the others.
 func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pluginv1.FulfillResponse, error) {
 	d := req.GetRequest()
 	mediaType, tmdbID, idErr := mediaTypeAndID(d)
@@ -98,28 +112,47 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	if len(req.GetQualities()) == 0 || len(req.GetConnections()) == 0 {
 		return &pluginv1.FulfillResponse{Message: "the request names no quality or no Seerr connection"}, nil
 	}
+	wants4K := false
+	for _, q := range req.GetQualities() {
+		wants4K = wants4K || q.GetIs4K()
+	}
 
 	first := connectionFromRouter(req.GetConnections()[0])
-	userID, mapFailed := resolveRequesterUserID(ctx, httpclient.New(first.BaseURL, first.APIKey, nil), first, d.GetRequesterEmail())
+	userID, mapFailed := resolveRequesterUserID(ctx, httpclient.New(first.BaseURL, first.APIKey, nil), first, d.GetRequesterEmail(), wants4K && first.Supports4K)
 	if mapFailed && first.RequireMappedUser {
 		return &pluginv1.FulfillResponse{Message: fmt.Sprintf("could not map requester %q to a Seerr user", d.GetRequesterEmail())}, nil
 	}
 
-	service := serviceFor(mediaType)
 	var targets []*pluginv1.FulfillmentTarget
 	for _, c := range req.GetConnections() {
 		conn := connectionFromRouter(c)
 		client := httpclient.New(conn.BaseURL, conn.APIKey, nil)
-		var t *pluginv1.FulfillmentTarget
-		check := checkDestination(ctx, newServerLister(client), conn, service, true)
-		if msg := check.message(service); msg != "" {
-			// Never fall back to Seerr's own choice: the admin chose a
-			// destination, and sending elsewhere would hide the mistake.
-			t = &pluginv1.FulfillmentTarget{Status: "failed", Message: msg}
-		} else {
-			t = s.fulfillOne(ctx, client, mediaType, tmdbID, userID, check.dest)
+		lister := newServerLister(client)
+		// submit makes one Seerr request of a tier. The target it returns
+		// has no quality yet.
+		submit := func(is4k bool) *pluginv1.FulfillmentTarget {
+			service := serviceFor(mediaType, is4k)
+			var t *pluginv1.FulfillmentTarget
+			check := checkDestination(ctx, lister, conn, service, true)
+			if msg := check.message(service); msg != "" {
+				// Never fall back to Seerr's own choice: the admin chose a
+				// destination, and sending elsewhere would hide the mistake.
+				t = &pluginv1.FulfillmentTarget{Status: "failed", Message: msg}
+			} else {
+				t = s.fulfillOne(ctx, client, mediaType, tmdbID, userID, is4k, check.dest)
+			}
+			t.ConnectionId = conn.ID
+			return t
 		}
-		t.ConnectionId = conn.ID
+		if conn.Supports4K {
+			for _, q := range req.GetQualities() {
+				t := submit(q.GetIs4K())
+				t.Quality = q.GetId()
+				targets = append(targets, t)
+			}
+			continue
+		}
+		t := submit(false)
 		for _, q := range req.GetQualities() {
 			qt := proto.Clone(t).(*pluginv1.FulfillmentTarget)
 			qt.Quality = q.GetId()
@@ -129,12 +162,12 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	return &pluginv1.FulfillResponse{Targets: targets}, nil
 }
 
-// fulfillOne submits a connection's one request. The target it returns has no
-// quality or connection yet.
-func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, mediaType string, tmdbID, userID int, dest destination) *pluginv1.FulfillmentTarget {
+// fulfillOne submits one Seerr request of a tier. The target it returns has
+// no quality or connection yet.
+func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, mediaType string, tmdbID, userID int, is4k bool, dest destination) *pluginv1.FulfillmentTarget {
 	t := &pluginv1.FulfillmentTarget{}
 	body := seerr.CreateRequestBody{
-		MediaType: mediaType, MediaID: tmdbID,
+		MediaType: mediaType, MediaID: tmdbID, Is4K: is4k,
 		ServerID: dest.ServerID, ProfileID: dest.ProfileID, RootFolder: dest.RootFolder,
 	}
 	if mediaType == "tv" {
@@ -155,11 +188,11 @@ func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, medi
 		// 2xx but no usable id (empty body): recover the existing request,
 		// the same way the duplicate path does. Never emit a queued target
 		// with a zero external id.
-		recoverExisting(ctx, client, t, mediaType, tmdbID, false, dest.ServerID)
+		recoverExisting(ctx, client, t, mediaType, tmdbID, is4k, false, dest.ServerID)
 	case isStatusError && se.StatusCode == http.StatusConflict:
 		// Also how a routed request's second tier arrives: Silo calls once
 		// per tier, and the first call already made the title's request.
-		recoverExisting(ctx, client, t, mediaType, tmdbID, true, dest.ServerID)
+		recoverExisting(ctx, client, t, mediaType, tmdbID, is4k, true, dest.ServerID)
 	default:
 		t.Status = "failed"
 		t.Message = err.Error()
@@ -167,13 +200,13 @@ func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, medi
 	return t
 }
 
-// recoverExisting resolves an existing standard Seerr request id for the
+// recoverExisting resolves an existing Seerr request id of the tier for the
 // title, used when a create returned no usable id (empty body) or 409
 // duplicate. duplicate selects the wording. On no match the target fails with a
 // clear message rather than queuing with a zero external id. The existing
 // request keeps the profile and folder it was made with.
-func recoverExisting(ctx context.Context, client *httpclient.Client, t *pluginv1.FulfillmentTarget, mediaType string, tmdbID int, duplicate bool, serverID *int) {
-	if found, ferr := seerr.FindExistingRequest(ctx, client, mediaType, tmdbID, false, serverID); ferr == nil && found != nil {
+func recoverExisting(ctx context.Context, client *httpclient.Client, t *pluginv1.FulfillmentTarget, mediaType string, tmdbID int, is4k, duplicate bool, serverID *int) {
+	if found, ferr := seerr.FindExistingRequest(ctx, client, mediaType, tmdbID, is4k, serverID); ferr == nil && found != nil {
 		t.Status = "queued"
 		t.ExternalId = itoa(found.ID)
 		t.ExternalStatus = itoa(found.MediaStatus())

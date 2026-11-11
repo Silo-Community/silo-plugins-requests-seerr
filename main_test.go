@@ -42,11 +42,28 @@ func TestEmbeddedManifestLoads(t *testing.T) {
 		"radarr_server_id", "radarr_profile_id", "radarr_root_folder",
 		"sonarr_server_id", "sonarr_profile_id", "sonarr_root_folder",
 	}
+	// The same picks for the 4K request of a Seerr with a separate 4K server.
+	destination4K := []string{
+		"radarr_4k_server_id", "radarr_4k_profile_id", "radarr_4k_root_folder",
+		"sonarr_4k_server_id", "sonarr_4k_profile_id", "sonarr_4k_root_folder",
+	}
 	fields := map[string]bool{}
 	for _, f := range caps[0].GetConfigSchema()[0].GetAdminForm().GetFields() {
 		fields[f.GetKey()] = true
-		if !slices.Contains(destination, f.GetKey()) {
+		if f.GetKey() == "supports_4k" {
+			// Silo reads this key: off, it does not ask the connection for a
+			// 2160p copy on its own. Off must stay the default.
+			if f.GetControl().String() != "ADMIN_FORM_CONTROL_SWITCH" || f.GetDefaultValue().GetBoolValue() {
+				t.Fatalf("supports_4k: want a switch that is off by default")
+			}
+		}
+		is4K := slices.Contains(destination4K, f.GetKey())
+		if !is4K && !slices.Contains(destination, f.GetKey()) {
 			continue
+		}
+		// The 4K picks show only with a separate 4K server.
+		if show := f.GetShowWhen(); is4K && (len(show) != 1 || show[0].GetField() != "supports_4k" || !slices.Equal(show[0].GetEquals(), []string{"true"})) {
+			t.Fatalf("%s: want it shown only while supports_4k is on", f.GetKey())
 		}
 		if f.GetControl().String() != "ADMIN_FORM_CONTROL_SELECT" || !f.GetDynamicOptions() {
 			t.Fatalf("%s: want a dynamic select, got %v dynamic=%v", f.GetKey(), f.GetControl(), f.GetDynamicOptions())
@@ -55,7 +72,7 @@ func TestEmbeddedManifestLoads(t *testing.T) {
 			t.Fatalf("%s: want a \"default\" default with one static Seerr default option", f.GetKey())
 		}
 	}
-	for _, key := range destination {
+	for _, key := range append([]string{"supports_4k"}, append(destination, destination4K...)...) {
 		if !fields[key] {
 			t.Fatalf("admin form is missing %s", key)
 		}
@@ -98,11 +115,4 @@ func TestEmbeddedManifestLoads(t *testing.T) {
 		}
 	}
 
-	// The plugin makes one standard request per title, so nothing may tell
-	// Silo that a connection takes a separate 4K copy.
-	for _, key := range []string{"supports_4k", "radarr_4k_server_id", "sonarr_4k_server_id"} {
-		if fields[key] {
-			t.Fatalf("admin form still has %s", key)
-		}
-	}
 }

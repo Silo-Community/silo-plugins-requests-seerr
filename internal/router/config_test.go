@@ -14,11 +14,10 @@ func TestConnectionFromRouterParsesRequesterConfig(t *testing.T) {
 		"radarr_4k_server_id": "3",
 	})
 	conn := connectionFromRouter(&pluginv1.RouterConnection{Id: "c1", BaseUrl: "http://x", ApiKey: "k", Config: s})
-	if !conn.Mapped || !conn.RequireMappedUser || !conn.AutoApprove {
+	if !conn.Mapped || !conn.RequireMappedUser || !conn.AutoApprove || !conn.Supports4K {
 		t.Fatalf("parsed wrong: %+v", conn)
 	}
-	// Keys of earlier versions are dropped.
-	if len(conn.Destination) != 2 || conn.Destination["radarr_profile_id"] != "4" || conn.Destination["sonarr_root_folder"] != "/tv" {
+	if len(conn.Destination) != 3 || conn.Destination["radarr_profile_id"] != "4" || conn.Destination["sonarr_root_folder"] != "/tv" || conn.Destination["radarr_4k_server_id"] != "3" {
 		t.Fatalf("destination parsed wrong: %+v", conn.Destination)
 	}
 }

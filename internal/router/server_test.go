@@ -79,11 +79,31 @@ func TestFulfillHDOnly(t *testing.T) {
 	}
 }
 
-// A Radarr or Sonarr holds one copy of a title, so HD and 4K are answered by
-// the same standard Seerr request.
+// A Seerr with a separate 4K server gets one request per quality, and the 4K
+// one is a 4K request.
+func TestFulfillSendsOneRequestPerQualityToSeparate4KServer(t *testing.T) {
+	stub := &seerrStub{}
+	srv := httptest.NewServer(stub.handler(t))
+	defer srv.Close()
+
+	resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
+		Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "9"}},
+		Qualities:   []*pluginv1.RequestedQuality{{Id: "1080p", Is4K: false}, {Id: "2160p", Is4K: true}},
+		Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+	})
+	if len(stub.bodies) != 2 || stub.bodies[0]["is4k"] != false || stub.bodies[1]["is4k"] != true {
+		t.Fatalf("want a standard and a 4K request, got %+v", stub.bodies)
+	}
+	got := resp.GetTargets()
+	if len(got) != 2 || got[0].GetQuality() != "1080p" || got[1].GetQuality() != "2160p" || got[0].GetExternalId() == got[1].GetExternalId() {
+		t.Fatalf("want one target per quality, each with its own request: %v", got)
+	}
+}
+
+// A Radarr or Sonarr holds one copy of a title, so without a separate 4K
+// server HD and 4K are answered by the same standard Seerr request.
 func TestFulfillAnswersEveryQualityWithOneStandardRequest(t *testing.T) {
-	// The legacy supports_4k switch no longer changes anything.
-	for _, legacy := range []bool{true, false} {
+	for _, legacy := range []bool{false} {
 		stub := &seerrStub{}
 		srv := httptest.NewServer(stub.handler(t))
 
@@ -228,7 +248,7 @@ func TestFulfillRecoversRequestOutsideRecentPage(t *testing.T) {
 					resp, err := New().Fulfill(t.Context(), &pluginv1.FulfillRequest{
 						Request:     &pluginv1.RequestDescriptor{MediaType: mediaType, ExternalIds: map[string]string{"tmdb": "42"}},
 						Qualities:   []*pluginv1.RequestedQuality{{Id: "test-tier", Is4K: wants4K}},
-						Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+						Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, false)},
 					})
 					if err != nil || len(resp.GetTargets()) != 1 {
 						t.Fatalf("Fulfill: response=%v err=%v", resp, err)
@@ -244,9 +264,39 @@ func TestFulfillRecoversRequestOutsideRecentPage(t *testing.T) {
 	}
 }
 
-// A 4K quality follows the standard request, so its external status is the
-// media's standard status, on both the create and the duplicate-recovery
-// paths. Requests Seerr holds for its 4K tier are not picked up.
+// With a separate 4K server, a duplicate 4K request recovers the request
+// Seerr holds for its 4K tier, with that tier's status.
+func TestFulfill4KQualityRecovers4KRequestOnSeparateServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/request" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusConflict)
+		case r.URL.Path == "/api/v1/request" && r.Method == http.MethodGet:
+			w.Write([]byte(`{"results":[
+				{"id":63,"is4k":true,"media":{"mediaType":"movie","tmdbId":42,"status":3,"status4k":5}},
+				{"id":62,"is4k":false,"media":{"mediaType":"movie","tmdbId":42,"status":3,"status4k":5}}]}`))
+		default:
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
+		Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "42"}},
+		Qualities:   []*pluginv1.RequestedQuality{{Id: "2160p", Is4K: true}},
+		Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+	})
+	if len(resp.GetTargets()) != 1 {
+		t.Fatalf("want 1 target, got %d", len(resp.GetTargets()))
+	}
+	if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "queued" || tgt.GetExternalId() != "63" || tgt.GetExternalStatus() != "5" {
+		t.Fatalf("want queued 4K request 63 with external status 5, got %+v", tgt)
+	}
+}
+
+// Without a separate 4K server a 4K quality follows the standard request, so
+// its external status is the media's standard status, on both the create and
+// the duplicate-recovery paths. Requests Seerr holds for its 4K tier are not
+// picked up.
 func TestFulfill4KQualityReadsTheStandardRequest(t *testing.T) {
 	for _, dup := range []bool{false, true} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +317,7 @@ func TestFulfill4KQualityReadsTheStandardRequest(t *testing.T) {
 		resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
 			Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "42"}},
 			Qualities:   []*pluginv1.RequestedQuality{{Id: "2160p", Is4K: true}},
-			Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+			Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, false)},
 		})
 		srv.Close()
 		wantID, wantStatus := "61", "2"

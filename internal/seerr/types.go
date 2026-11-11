@@ -2,16 +2,18 @@ package seerr
 
 // Overseerr Permission bit values (server/lib/permissions.ts).
 const (
-	PermRequest     = 32
-	PermAutoApprove = 128
+	PermRequest       = 32
+	PermAutoApprove   = 128
+	PermRequest4K     = 1024
+	PermAutoApprove4K = 32768
 )
 
 // CreateRequestBody is the POST /api/v1/request body. UserID is set when
 // attributing the request to a mapped Seerr user.
 //
-// Is4K is always false and always sent: the plugin makes one standard request
-// per title and leaves the resolution to the quality profile. An older Seerr
-// reads a missing is4k as null when it looks for duplicates.
+// Is4K is always sent: an older Seerr reads a missing is4k as null when it
+// looks for duplicates. It is true only for the 4K request of a connection
+// whose Seerr has a separate 4K server.
 //
 // ServerID, ProfileID and RootFolder are set only when the connection (or a
 // Silo route's override, or the requester) picks them; unset leaves Seerr its

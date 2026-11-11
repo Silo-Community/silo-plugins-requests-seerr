@@ -14,24 +14,42 @@ import (
 // Destination config keys. For each media type they name the Seerr
 // Radarr/Sonarr server a request goes to, and the quality profile and root
 // folder it gets there. Unset, empty or "default" leaves Seerr's own choice.
-// A Silo route can override any of them per rule.
+// A Silo route can override any of them per rule. The 4K keys apply to the
+// 4K request of a connection whose Seerr has a separate 4K server.
 const (
-	keyRadarrServer     = "radarr_server_id"
-	keyRadarrProfile    = "radarr_profile_id"
-	keyRadarrRootFolder = "radarr_root_folder"
-	keySonarrServer     = "sonarr_server_id"
-	keySonarrProfile    = "sonarr_profile_id"
-	keySonarrRootFolder = "sonarr_root_folder"
+	keyRadarrServer       = "radarr_server_id"
+	keyRadarrProfile      = "radarr_profile_id"
+	keyRadarrRootFolder   = "radarr_root_folder"
+	keyRadarr4KServer     = "radarr_4k_server_id"
+	keyRadarr4KProfile    = "radarr_4k_profile_id"
+	keyRadarr4KRootFolder = "radarr_4k_root_folder"
+	keySonarrServer       = "sonarr_server_id"
+	keySonarrProfile      = "sonarr_profile_id"
+	keySonarrRootFolder   = "sonarr_root_folder"
+	keySonarr4KServer     = "sonarr_4k_server_id"
+	keySonarr4KProfile    = "sonarr_4k_profile_id"
+	keySonarr4KRootFolder = "sonarr_4k_root_folder"
 )
+
+// keySupports4K is the switch that says the Seerr has a separate 4K Radarr or
+// Sonarr. On: each quality tier is its own Seerr request, and the 4K one goes
+// to the 4K server. Off: a title is one standard request and its quality
+// profile decides the resolution. Silo reads the key too: off, it does not
+// ask the connection for a 2160p copy on its own.
+const keySupports4K = "supports_4k"
 
 // seerrDefault is the select value for "Seerr default": send nothing and let
 // Seerr decide. It is not empty because Silo's route editor cannot show a
 // select option whose value is empty.
 const seerrDefault = "default"
 
-// serviceFields names the destination keys of one Seerr service kind.
+// serviceFields names the destination keys of one Seerr service kind and
+// tier.
 type serviceFields struct {
-	Kind       string // seerr.ServiceRadarr | seerr.ServiceSonarr
+	Kind string // seerr.ServiceRadarr | seerr.ServiceSonarr
+	// Is4K marks the keys of the 4K request, which goes to a server Seerr
+	// marks as 4K.
+	Is4K       bool
 	Server     string
 	Profile    string
 	RootFolder string
@@ -42,19 +60,40 @@ func (f serviceFields) keys() []string {
 	return []string{f.Server, f.Profile, f.RootFolder}
 }
 
-// services lists every service kind's destination keys, in form order.
+// services lists every service kind's and tier's destination keys, in form
+// order.
 var services = []serviceFields{
-	{seerr.ServiceRadarr, keyRadarrServer, keyRadarrProfile, keyRadarrRootFolder},
-	{seerr.ServiceSonarr, keySonarrServer, keySonarrProfile, keySonarrRootFolder},
+	{seerr.ServiceRadarr, false, keyRadarrServer, keyRadarrProfile, keyRadarrRootFolder},
+	{seerr.ServiceRadarr, true, keyRadarr4KServer, keyRadarr4KProfile, keyRadarr4KRootFolder},
+	{seerr.ServiceSonarr, false, keySonarrServer, keySonarrProfile, keySonarrRootFolder},
+	{seerr.ServiceSonarr, true, keySonarr4KServer, keySonarr4KProfile, keySonarr4KRootFolder},
 }
 
 // serviceFor returns the destination keys for a Seerr media type
-// ("movie" | "tv").
-func serviceFor(mediaType string) serviceFields {
+// ("movie" | "tv") and tier.
+func serviceFor(mediaType string, is4k bool) serviceFields {
+	kind := seerr.ServiceRadarr
 	if mediaType == "tv" {
-		return services[1]
+		kind = seerr.ServiceSonarr
 	}
-	return services[0]
+	for _, f := range services {
+		if f.Kind == kind && f.Is4K == is4k {
+			return f
+		}
+	}
+	panic("unreachable: every kind and tier has destination keys")
+}
+
+// servicesOf lists the services a connection uses: the 4K ones only when its
+// Seerr has a separate 4K server.
+func servicesOf(conn Connection) []serviceFields {
+	var out []serviceFields
+	for _, f := range services {
+		if !f.Is4K || conn.Supports4K {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // Connection is the per-call Seerr connection: base URL + API key (host chrome)
@@ -64,9 +103,13 @@ type Connection struct {
 	BaseURL string
 	APIKey  string
 
+	// Supports4K says the Seerr has a separate 4K Radarr or Sonarr, so each
+	// quality tier is its own Seerr request.
+	Supports4K bool
+
 	Mapped            bool // requester_mode == "mapped"
 	RequireMappedUser bool // mapped + can't map -> fail the request (else admin fallback)
-	AutoApprove       bool // grant AUTO_APPROVE to mapped users
+	AutoApprove       bool // grant AUTO_APPROVE (and its 4K twin) to mapped users
 
 	// Destination holds the raw destination values, keyed by config key.
 	// Absent, empty or "default" means Seerr's own choice.
@@ -74,8 +117,7 @@ type Connection struct {
 }
 
 // connectionFromRouter parses a host-supplied RouterConnection. base_url and
-// api_key are chrome; the remaining fields come from the config struct. Keys
-// of earlier versions (supports_4k, the 4K server picks) are ignored.
+// api_key are chrome; the remaining fields come from the config struct.
 func connectionFromRouter(c *pluginv1.RouterConnection) Connection {
 	conn := Connection{
 		ID:          c.GetId(),
@@ -90,6 +132,7 @@ func connectionFromRouter(c *pluginv1.RouterConnection) Connection {
 		}
 		conn.RequireMappedUser, _ = m["require_mapped_user"].(bool)
 		conn.AutoApprove, _ = m["auto_approve"].(bool)
+		conn.Supports4K, _ = m[keySupports4K].(bool)
 		for _, f := range services {
 			for _, key := range f.keys() {
 				if v, ok := m[key]; ok {

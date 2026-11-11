@@ -585,3 +585,45 @@ func TestOptionalServerLookupsReturnBeforeRPCDeadline(t *testing.T) {
 		})
 	}
 }
+
+// With a separate 4K server, the 4K request takes the 4K destination keys and
+// the standard request the standard ones.
+func TestFulfillSends4KDestinationToSeparateServer(t *testing.T) {
+	stub := &multiServerSeerr{}
+	resp := fulfill(t, "movie", hdUHD, serverConn(t, newMultiServerSeerr(t, stub), map[string]any{
+		"supports_4k":      true,
+		"radarr_server_id": "2", "radarr_4k_server_id": "1",
+	}))
+	if len(resp.GetTargets()) != 2 || len(stub.bodies) != 2 {
+		t.Fatalf("want two requests and targets: targets=%v bodies=%v", resp.GetTargets(), stub.bodies)
+	}
+	hdBody, uhdBody := stub.bodies[0], stub.bodies[1]
+	if hdBody["is4k"] != false || hdBody["serverId"] != float64(2) {
+		t.Fatalf("standard request: %+v", hdBody)
+	}
+	if uhdBody["is4k"] != true || uhdBody["serverId"] != float64(1) {
+		t.Fatalf("4K request: %+v", uhdBody)
+	}
+}
+
+func TestValidateChecksServerTier(t *testing.T) {
+	validate := func(cfg map[string]any) map[string]string {
+		t.Helper()
+		resp, err := New().Validate(context.Background(), &pluginv1.ValidateRequest{
+			Connection: serverConn(t, newMultiServerSeerr(t, &multiServerSeerr{}), cfg),
+		})
+		if err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		return resp.GetFieldErrors()
+	}
+	// Server 0 is a standard server and server 1 a 4K one.
+	fe := validate(map[string]any{"supports_4k": true, "radarr_4k_server_id": "0", "sonarr_4k_server_id": "1", "sonarr_server_id": "1"})
+	if fe["radarr_4k_server_id"] == "" || fe["sonarr_server_id"] == "" || fe["sonarr_4k_server_id"] != "" {
+		t.Fatalf("want the tier mismatches flagged: %v", fe)
+	}
+	// Without a separate 4K server the 4K fields are hidden and not checked.
+	if fe := validate(map[string]any{"radarr_4k_server_id": "0"}); len(fe) != 0 {
+		t.Fatalf("hidden 4K fields must not be checked: %v", fe)
+	}
+}
