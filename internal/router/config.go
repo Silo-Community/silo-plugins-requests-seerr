@@ -11,126 +11,150 @@ import (
 	"github.com/Silo-Community/silo-plugins-requests-seerr/internal/seerr"
 )
 
-// Server-selection config keys. Each names the Seerr Radarr/Sonarr server one
-// (media type, quality tier) goes to; unset or empty leaves Seerr's default
-// server for that tier. A Silo route can override any of them per tier.
+// Destination config keys. For each media type they name the Seerr
+// Radarr/Sonarr server a request goes to, and the quality profile and root
+// folder it gets there. Unset, empty or "default" leaves Seerr's own choice.
+// A Silo route can override any of them per rule.
 const (
-	keyRadarrServer   = "radarr_server_id"
-	keyRadarr4KServer = "radarr_4k_server_id"
-	keySonarrServer   = "sonarr_server_id"
-	keySonarr4KServer = "sonarr_4k_server_id"
+	keyRadarrServer     = "radarr_server_id"
+	keyRadarrProfile    = "radarr_profile_id"
+	keyRadarrRootFolder = "radarr_root_folder"
+	keySonarrServer     = "sonarr_server_id"
+	keySonarrProfile    = "sonarr_profile_id"
+	keySonarrRootFolder = "sonarr_root_folder"
 )
 
-// serverDefault is the select value for "Seerr default": send no serverId and
-// let Seerr use its default server for the tier. It is not empty because
-// Silo's route editor cannot show a select option whose value is empty.
-const serverDefault = "default"
+// seerrDefault is the select value for "Seerr default": send nothing and let
+// Seerr decide. It is not empty because Silo's route editor cannot show a
+// select option whose value is empty.
+const seerrDefault = "default"
 
-// serverField describes one server-selection key: which Seerr service kind it
-// picks from and which tier it serves.
-type serverField struct {
-	Key  string
-	Kind string // seerr.ServiceRadarr | seerr.ServiceSonarr
-	Is4K bool
+// serviceFields names the destination keys of one Seerr service kind.
+type serviceFields struct {
+	Kind       string // seerr.ServiceRadarr | seerr.ServiceSonarr
+	Server     string
+	Profile    string
+	RootFolder string
 }
 
-// serverFields lists every server-selection key, in form order.
-var serverFields = []serverField{
-	{keyRadarrServer, seerr.ServiceRadarr, false},
-	{keyRadarr4KServer, seerr.ServiceRadarr, true},
-	{keySonarrServer, seerr.ServiceSonarr, false},
-	{keySonarr4KServer, seerr.ServiceSonarr, true},
+// keys lists the service's config keys in form order.
+func (f serviceFields) keys() []string {
+	return []string{f.Server, f.Profile, f.RootFolder}
 }
 
-// serverFieldFor returns the server-selection key for a Seerr media type
-// ("movie" | "tv") and tier.
-func serverFieldFor(mediaType string, is4k bool) serverField {
-	kind := seerr.ServiceRadarr
+// services lists every service kind's destination keys, in form order.
+var services = []serviceFields{
+	{seerr.ServiceRadarr, keyRadarrServer, keyRadarrProfile, keyRadarrRootFolder},
+	{seerr.ServiceSonarr, keySonarrServer, keySonarrProfile, keySonarrRootFolder},
+}
+
+// serviceFor returns the destination keys for a Seerr media type
+// ("movie" | "tv").
+func serviceFor(mediaType string) serviceFields {
 	if mediaType == "tv" {
-		kind = seerr.ServiceSonarr
+		return services[1]
 	}
-	for _, f := range serverFields {
-		if f.Kind == kind && f.Is4K == is4k {
-			return f
-		}
-	}
-	panic("unreachable: every kind/tier pair has a server field")
+	return services[0]
 }
 
 // Connection is the per-call Seerr connection: base URL + API key (host chrome)
 // plus plugin_config fields.
 type Connection struct {
-	ID         string
-	BaseURL    string
-	APIKey     string
-	Supports4K bool
+	ID      string
+	BaseURL string
+	APIKey  string
 
 	Mapped            bool // requester_mode == "mapped"
 	RequireMappedUser bool // mapped + can't map -> fail the request (else admin fallback)
-	AutoApprove       bool // grant AUTO_APPROVE(+4K) to mapped users
+	AutoApprove       bool // grant AUTO_APPROVE to mapped users
 
-	// Servers holds the raw server-selection values, keyed by config key.
-	// Absent or empty means Seerr's default server for that tier.
-	Servers map[string]any
+	// Destination holds the raw destination values, keyed by config key.
+	// Absent, empty or "default" means Seerr's own choice.
+	Destination map[string]any
 }
 
 // connectionFromRouter parses a host-supplied RouterConnection. base_url and
-// api_key are chrome; the remaining fields come from the config struct.
+// api_key are chrome; the remaining fields come from the config struct. Keys
+// of earlier versions (supports_4k, the 4K server picks) are ignored.
 func connectionFromRouter(c *pluginv1.RouterConnection) Connection {
 	conn := Connection{
-		ID:      c.GetId(),
-		BaseURL: c.GetBaseUrl(),
-		APIKey:  c.GetApiKey(),
-		Servers: map[string]any{},
+		ID:          c.GetId(),
+		BaseURL:     c.GetBaseUrl(),
+		APIKey:      c.GetApiKey(),
+		Destination: map[string]any{},
 	}
 	if cfg := c.GetConfig(); cfg != nil {
 		m := cfg.AsMap()
-		if v, ok := m["supports_4k"].(bool); ok {
-			conn.Supports4K = v
-		}
 		if v, ok := m["requester_mode"].(string); ok {
 			conn.Mapped = v == "mapped"
 		}
 		conn.RequireMappedUser, _ = m["require_mapped_user"].(bool)
 		conn.AutoApprove, _ = m["auto_approve"].(bool)
-		for _, f := range serverFields {
-			if v, ok := m[f.Key]; ok {
-				conn.Servers[f.Key] = v
+		for _, f := range services {
+			for _, key := range f.keys() {
+				if v, ok := m[key]; ok {
+					conn.Destination[key] = v
+				}
 			}
 		}
 	}
 	return conn
 }
 
-// ServerID returns the Seerr server id configured under key: nil when unset,
-// empty or "default" (use Seerr's default), or an error when the value is not
-// a whole number of 0 or more. The admin form stores select values as
-// strings; a number is accepted too, for configs written through the API.
+// ServerID returns the Seerr server id configured under key: nil for Seerr's
+// default, or an error when the value is not a whole number of 0 or more.
 func (c Connection) ServerID(key string) (*int, error) {
-	return parseServerID(c.Servers[key])
+	return parseID(c.Destination[key], "server")
 }
 
-func parseServerID(v any) (*int, error) {
+// ProfileID returns the quality profile id configured under key: nil for the
+// server's own profile, or an error when the value is not a whole number of 0
+// or more.
+func (c Connection) ProfileID(key string) (*int, error) {
+	return parseID(c.Destination[key], "quality profile")
+}
+
+// RootFolder returns the root folder path configured under key: empty for the
+// server's own folder, or an error when the value is not a path.
+func (c Connection) RootFolder(key string) (string, error) {
+	switch x := c.Destination[key].(type) {
+	case nil:
+		return "", nil
+	case string:
+		s := strings.TrimSpace(x)
+		if strings.EqualFold(s, seerrDefault) {
+			return "", nil
+		}
+		return s, nil
+	default:
+		return "", fmt.Errorf("%v is not a root folder path", x)
+	}
+}
+
+// parseID reads an id select. The admin form stores select values as strings;
+// a number is accepted too, for configs written through the API. what names
+// the thing the id belongs to, for the error.
+func parseID(v any, what string) (*int, error) {
 	switch x := v.(type) {
 	case nil:
 		return nil, nil
 	case string:
 		s := strings.TrimSpace(x)
-		if s == "" || strings.EqualFold(s, serverDefault) {
+		if s == "" || strings.EqualFold(s, seerrDefault) {
 			return nil, nil
 		}
 		n, err := strconv.Atoi(s)
 		if err != nil || n < 0 {
-			return nil, fmt.Errorf("%q is not a Seerr server id", x)
+			return nil, fmt.Errorf("%q is not a Seerr %s id", x, what)
 		}
 		return &n, nil
 	case float64:
 		if x < 0 || x != math.Trunc(x) || x > math.MaxInt32 {
-			return nil, fmt.Errorf("%v is not a Seerr server id", x)
+			return nil, fmt.Errorf("%v is not a Seerr %s id", x, what)
 		}
 		n := int(x)
 		return &n, nil
 	default:
-		return nil, fmt.Errorf("%v is not a Seerr server id", x)
+		return nil, fmt.Errorf("%v is not a Seerr %s id", x, what)
 	}
 }
