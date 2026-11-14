@@ -5,23 +5,30 @@ const (
 	PermRequest       = 32
 	PermAutoApprove   = 128
 	PermRequest4K     = 1024
-	PermAutoApprove4K = 32768 // AUTO_APPROVE_4K (verified against Overseerr server/lib/permissions.ts)
+	PermAutoApprove4K = 32768
 )
 
 // CreateRequestBody is the POST /api/v1/request body. UserID is set when
 // attributing the request to a mapped Seerr user.
 //
-// ServerID is set only when the connection (or a Silo route's override) picks
-// a Radarr/Sonarr server; nil leaves Seerr to use its default server for the
-// tier. It is a pointer because Seerr numbers servers from 0. profileId and
-// rootFolder are not sent: Seerr applies the chosen server's own defaults.
+// Is4K is always sent: an older Seerr reads a missing is4k as null when it
+// looks for duplicates. It is true only for the 4K request of a connection
+// whose Seerr has a separate 4K server.
+//
+// ServerID, ProfileID and RootFolder are set only when the connection (or a
+// Silo route's override, or the requester) picks them; unset leaves Seerr its
+// default server and that server's own profile and folder. ServerID is a
+// pointer because Seerr numbers servers from 0. Seerr honours the three only
+// for an API key whose owner may manage requests, which an admin's key may.
 type CreateRequestBody struct {
-	MediaType string `json:"mediaType"` // "movie" | "tv"
-	MediaID   int    `json:"mediaId"`   // TMDB id
-	Is4K      bool   `json:"is4k"`
-	Seasons   any    `json:"seasons,omitempty"` // "all" for tv; omitted for movie
-	UserID    int    `json:"userId,omitempty"`
-	ServerID  *int   `json:"serverId,omitempty"`
+	MediaType  string `json:"mediaType"` // "movie" | "tv"
+	MediaID    int    `json:"mediaId"`   // TMDB id
+	Is4K       bool   `json:"is4k"`
+	Seasons    any    `json:"seasons,omitempty"` // "all" for tv; omitted for movie
+	UserID     int    `json:"userId,omitempty"`
+	ServerID   *int   `json:"serverId,omitempty"`
+	ProfileID  *int   `json:"profileId,omitempty"`
+	RootFolder string `json:"rootFolder,omitempty"`
 }
 
 // MediaInfo is the nested media record on a MediaRequest. Seerr tracks the HD

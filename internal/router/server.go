@@ -14,6 +14,7 @@ import (
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/Silo-Community/silo-plugins-requests-seerr/internal/seerr"
@@ -43,17 +44,17 @@ func mediaTypeAndID(d *pluginv1.RequestDescriptor) (mediaType string, tmdbID int
 }
 
 // userPermissions builds a created Seerr user's Overseerr permission bitfield:
-// everyone may request 1080p; REQUEST_4K when the request carries a 4K quality
-// (host-decided per the requester's max quality / global force-dual);
-// AUTO_APPROVE(+4K) when the connection auto-approves.
-func userPermissions(conn Connection, requestHas4K bool) int {
+// everyone may request; AUTO_APPROVE when the connection auto-approves. A
+// request that sends a 4K request to a separate 4K server also needs
+// REQUEST_4K, and AUTO_APPROVE_4K when the connection auto-approves.
+func userPermissions(conn Connection, sends4K bool) int {
 	bits := seerr.PermRequest
-	if requestHas4K {
+	if sends4K {
 		bits |= seerr.PermRequest4K
 	}
 	if conn.AutoApprove {
 		bits |= seerr.PermAutoApprove
-		if requestHas4K {
+		if sends4K {
 			bits |= seerr.PermAutoApprove4K
 		}
 	}
@@ -65,7 +66,7 @@ func userPermissions(conn Connection, requestHas4K bool) int {
 // (missing email or a lookup/create error); the caller decides whether that means
 // admin fallback (userID 0) or a hard request failure. Resolved once per request
 // against the first connection's Seerr.
-func resolveRequesterUserID(ctx context.Context, client *httpclient.Client, conn Connection, email string, requestHas4K bool) (userID int, mapFailed bool) {
+func resolveRequesterUserID(ctx context.Context, client *httpclient.Client, conn Connection, email string, sends4K bool) (userID int, mapFailed bool) {
 	if !conn.Mapped {
 		return 0, false
 	}
@@ -80,7 +81,7 @@ func resolveRequesterUserID(ctx context.Context, client *httpclient.Client, conn
 	if user != nil {
 		return user.ID, false
 	}
-	created, err := seerr.CreateUser(ctx, client, email, userPermissions(conn, requestHas4K))
+	created, err := seerr.CreateUser(ctx, client, email, userPermissions(conn, sends4K))
 	if err != nil {
 		log.Printf("seerr: user create failed for %q: %v", email, err)
 		return 0, true
@@ -88,9 +89,19 @@ func resolveRequesterUserID(ctx context.Context, client *httpclient.Client, conn
 	return created.ID, false
 }
 
-// Fulfill submits one Seerr request per requested quality (is4k from the tier),
-// returning one FulfillmentTarget each. Per-target containment: one failing
-// quality/connection never aborts the others.
+// Fulfill submits the request to every connection and returns one
+// FulfillmentTarget per requested quality and connection.
+//
+// A connection whose Seerr has one Radarr or Sonarr for everything gets one
+// standard request: that server holds one copy of a title and its quality
+// profile decides the resolution, so every requested quality follows that
+// request. The host records a failed target for a quality it gets no target
+// for, so each one is answered.
+//
+// A connection whose Seerr has a separate 4K server (supports_4k) gets one
+// request per quality, and the 4K one goes to the 4K server.
+//
+// One failing connection or quality never aborts the others.
 func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pluginv1.FulfillResponse, error) {
 	d := req.GetRequest()
 	mediaType, tmdbID, idErr := mediaTypeAndID(d)
@@ -98,59 +109,67 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		// One request-level failure, not N identical per-target failures.
 		return &pluginv1.FulfillResponse{Message: idErr.Error()}, nil
 	}
-
-	requestHas4K := false
+	if len(req.GetQualities()) == 0 || len(req.GetConnections()) == 0 {
+		return &pluginv1.FulfillResponse{Message: "the request names no quality or no Seerr connection"}, nil
+	}
+	wants4K := false
 	for _, q := range req.GetQualities() {
-		if q.GetIs4K() {
-			requestHas4K = true
-			break
-		}
+		wants4K = wants4K || q.GetIs4K()
 	}
 
-	userID := 0
-	if len(req.GetConnections()) > 0 {
-		first := connectionFromRouter(req.GetConnections()[0])
-		fc := httpclient.New(first.BaseURL, first.APIKey, nil)
-		id, mapFailed := resolveRequesterUserID(ctx, fc, first, d.GetRequesterEmail(), requestHas4K)
-		if mapFailed && first.RequireMappedUser {
-			return &pluginv1.FulfillResponse{Message: fmt.Sprintf("could not map requester %q to a Seerr user", d.GetRequesterEmail())}, nil
-		}
-		userID = id
+	first := connectionFromRouter(req.GetConnections()[0])
+	userID, mapFailed := resolveRequesterUserID(ctx, httpclient.New(first.BaseURL, first.APIKey, nil), first, d.GetRequesterEmail(), wants4K && first.Supports4K)
+	if mapFailed && first.RequireMappedUser {
+		return &pluginv1.FulfillResponse{Message: fmt.Sprintf("could not map requester %q to a Seerr user", d.GetRequesterEmail())}, nil
 	}
 
 	var targets []*pluginv1.FulfillmentTarget
 	for _, c := range req.GetConnections() {
 		conn := connectionFromRouter(c)
 		client := httpclient.New(conn.BaseURL, conn.APIKey, nil)
-		servers := newServerLister(client)
-		for _, q := range req.GetQualities() {
-			is4k := q.GetIs4K()
-			if is4k && !conn.Supports4K {
-				continue // this connection does not fulfill 4K
+		lister := newServerLister(client)
+		// submit makes one Seerr request of a tier. The target it returns
+		// has no quality yet.
+		submit := func(is4k bool) *pluginv1.FulfillmentTarget {
+			service := serviceFor(mediaType, is4k)
+			var t *pluginv1.FulfillmentTarget
+			check := checkDestination(ctx, lister, conn, service, true)
+			if msg := check.message(service); msg != "" {
+				// Never fall back to Seerr's own choice: the admin chose a
+				// destination, and sending elsewhere would hide the mistake.
+				t = &pluginv1.FulfillmentTarget{Status: "failed", Message: msg}
+			} else {
+				t = s.fulfillOne(ctx, client, mediaType, tmdbID, userID, is4k, check.dest)
 			}
-			serverID, err := resolveServer(ctx, servers, conn, mediaType, is4k)
-			if err != nil {
-				// Never fall back to Seerr's default server: the admin chose
-				// a server, and sending elsewhere would hide the mistake.
-				targets = append(targets, &pluginv1.FulfillmentTarget{
-					Quality: q.GetId(), ConnectionId: conn.ID, Status: "failed", Message: err.Error(),
-				})
-				continue
-			}
-			targets = append(targets, s.fulfillOne(ctx, client, conn.ID, q.GetId(), mediaType, tmdbID, is4k, userID, serverID))
+			t.ConnectionId = conn.ID
+			return t
 		}
-	}
-	if len(targets) == 0 {
-		return &pluginv1.FulfillResponse{Message: "no Seerr connection fulfills the requested quality"}, nil
+		if conn.Supports4K {
+			for _, q := range req.GetQualities() {
+				t := submit(q.GetIs4K())
+				t.Quality = q.GetId()
+				targets = append(targets, t)
+			}
+			continue
+		}
+		t := submit(false)
+		for _, q := range req.GetQualities() {
+			qt := proto.Clone(t).(*pluginv1.FulfillmentTarget)
+			qt.Quality = q.GetId()
+			targets = append(targets, qt)
+		}
 	}
 	return &pluginv1.FulfillResponse{Targets: targets}, nil
 }
 
-// fulfillOne submits a single (connection, quality) target.
-// serverID is nil for Seerr's default server for the tier.
-func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, connID, quality, mediaType string, tmdbID int, is4k bool, userID int, serverID *int) *pluginv1.FulfillmentTarget {
-	t := &pluginv1.FulfillmentTarget{Quality: quality, ConnectionId: connID}
-	body := seerr.CreateRequestBody{MediaType: mediaType, MediaID: tmdbID, Is4K: is4k, ServerID: serverID}
+// fulfillOne submits one Seerr request of a tier. The target it returns has
+// no quality or connection yet.
+func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, mediaType string, tmdbID, userID int, is4k bool, dest destination) *pluginv1.FulfillmentTarget {
+	t := &pluginv1.FulfillmentTarget{}
+	body := seerr.CreateRequestBody{
+		MediaType: mediaType, MediaID: tmdbID, Is4K: is4k,
+		ServerID: dest.ServerID, ProfileID: dest.ProfileID, RootFolder: dest.RootFolder,
+	}
 	if mediaType == "tv" {
 		body.Seasons = "all"
 	}
@@ -169,9 +188,11 @@ func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, conn
 		// 2xx but no usable id (empty body): recover the existing request,
 		// the same way the duplicate path does. Never emit a queued target
 		// with a zero external id.
-		recoverExisting(ctx, client, t, mediaType, tmdbID, is4k, false, serverID)
+		recoverExisting(ctx, client, t, mediaType, tmdbID, is4k, false, dest.ServerID)
 	case isStatusError && se.StatusCode == http.StatusConflict:
-		recoverExisting(ctx, client, t, mediaType, tmdbID, is4k, true, serverID)
+		// Also how a routed request's second tier arrives: Silo calls once
+		// per tier, and the first call already made the title's request.
+		recoverExisting(ctx, client, t, mediaType, tmdbID, is4k, true, dest.ServerID)
 	default:
 		t.Status = "failed"
 		t.Message = err.Error()
@@ -179,10 +200,11 @@ func (s *Server) fulfillOne(ctx context.Context, client *httpclient.Client, conn
 	return t
 }
 
-// recoverExisting resolves an existing Seerr request id for the title,
-// used when a create returned no usable id (empty body) or 409
+// recoverExisting resolves an existing Seerr request id of the tier for the
+// title, used when a create returned no usable id (empty body) or 409
 // duplicate. duplicate selects the wording. On no match the target fails with a
-// clear message rather than queuing with a zero external id.
+// clear message rather than queuing with a zero external id. The existing
+// request keeps the profile and folder it was made with.
 func recoverExisting(ctx context.Context, client *httpclient.Client, t *pluginv1.FulfillmentTarget, mediaType string, tmdbID int, is4k, duplicate bool, serverID *int) {
 	if found, ferr := seerr.FindExistingRequest(ctx, client, mediaType, tmdbID, is4k, serverID); ferr == nil && found != nil {
 		t.Status = "queued"
@@ -279,27 +301,29 @@ func downloadProgress(p *seerr.Progress) *pluginv1.DownloadProgress {
 }
 
 // TestConnection verifies the base URL + API key by calling /auth/me, then
-// checks any configured Radarr/Sonarr servers against Seerr's. Never returns a
-// gRPC error; failure is Ok:false + message.
+// checks any configured server, quality profile and root folder against
+// Seerr's. Never returns a gRPC error; failure is Ok:false + message.
 func (s *Server) TestConnection(ctx context.Context, req *pluginv1.TestConnectionRequest) (*pluginv1.TestConnectionResponse, error) {
 	conn := connectionFromRouter(req.GetConnection())
 	client := httpclient.New(conn.BaseURL, conn.APIKey, nil)
 	if err := seerr.Me(ctx, client); err != nil {
 		return &pluginv1.TestConnectionResponse{Ok: false, Message: err.Error()}, nil
 	}
-	fieldErrs, unreachable := configuredServerErrors(ctx, newServerLister(client), conn, true)
-	if msgs := sortedMessages(fieldErrs); len(msgs) > 0 {
-		return &pluginv1.TestConnectionResponse{Ok: false, Message: strings.Join(msgs, "; ")}, nil
+	_, invalid, unreachable := configuredDestinationErrors(ctx, newServerLister(client), conn, true)
+	if len(invalid) > 0 {
+		return &pluginv1.TestConnectionResponse{Ok: false, Message: strings.Join(invalid, "; ")}, nil
 	}
 	if len(unreachable) > 0 {
-		return &pluginv1.TestConnectionResponse{Ok: false, Message: "connected, but could not list Seerr's servers to check " + strings.Join(unreachable, ", ")}, nil
+		return &pluginv1.TestConnectionResponse{Ok: false, Message: "connected, but " + strings.Join(unreachable, "; ")}, nil
 	}
 	return &pluginv1.TestConnectionResponse{Ok: true, Message: "connection successful"}, nil
 }
 
-// ListConfigOptions fills the Radarr/Sonarr server selects from Seerr's own
-// server lists. A Seerr that cannot be reached gets no options, and the form
-// falls back to each field's static "Seerr default" option.
+// ListConfigOptions fills the server, quality profile and root folder selects
+// from Seerr. Profiles and folders are those of the server picked in the
+// connection's config, or of Seerr's default server. A Seerr that cannot be
+// reached gets no options, and the form falls back to each field's static
+// "Seerr default" option.
 func (s *Server) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfigOptionsRequest) (*pluginv1.ListConfigOptionsResponse, error) {
 	conn := connectionFromRouter(req.GetConnection())
 	if strings.TrimSpace(conn.BaseURL) == "" {
@@ -308,12 +332,12 @@ func (s *Server) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfig
 	client := httpclient.New(conn.BaseURL, conn.APIKey, nil)
 	ctx, cancel := serverLookupContext(ctx)
 	defer cancel()
-	return &pluginv1.ListConfigOptionsResponse{OptionsByField: serverOptions(ctx, newServerLister(client))}, nil
+	return &pluginv1.ListConfigOptionsResponse{OptionsByField: destinationOptions(ctx, newServerLister(client), conn)}, nil
 }
 
-// Validate checks the server selects at save time: a value must be a server
-// id, and when Seerr can be reached it must name a server of the field's kind
-// and tier. An unreachable Seerr does not block the save; Fulfill and
+// Validate checks the destination selects at save time: a value must be an id
+// or a path, and when Seerr can be reached the server, profile and folder must
+// exist there. An unreachable Seerr does not block the save; Fulfill and
 // TestConnection check again.
 func (s *Server) Validate(ctx context.Context, req *pluginv1.ValidateRequest) (*pluginv1.ValidateResponse, error) {
 	ctx, cancel := serverLookupContext(ctx)
@@ -324,20 +348,9 @@ func (s *Server) Validate(ctx context.Context, req *pluginv1.ValidateRequest) (*
 	if checkSeerr {
 		lister = newServerLister(httpclient.New(conn.BaseURL, conn.APIKey, nil))
 	}
-	fieldErrs, _ := configuredServerErrors(ctx, lister, conn, checkSeerr)
+	fieldErrs, _, _ := configuredDestinationErrors(ctx, lister, conn, checkSeerr)
 	if len(fieldErrs) == 0 {
 		return &pluginv1.ValidateResponse{}, nil
 	}
 	return &pluginv1.ValidateResponse{FieldErrors: fieldErrs}, nil
-}
-
-// sortedMessages returns the messages of fieldErrs in server-field order.
-func sortedMessages(fieldErrs map[string]string) []string {
-	var out []string
-	for _, f := range serverFields {
-		if m, ok := fieldErrs[f.Key]; ok {
-			out = append(out, m)
-		}
-	}
-	return out
 }
