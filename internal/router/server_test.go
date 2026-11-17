@@ -79,28 +79,9 @@ func TestFulfillHDOnly(t *testing.T) {
 	}
 }
 
-func TestFulfillHDPlus4KWhenSupported(t *testing.T) {
-	stub := &seerrStub{}
-	srv := httptest.NewServer(stub.handler(t))
-	defer srv.Close()
-
-	resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
-		Request:     &pluginv1.RequestDescriptor{MediaType: "series", ExternalIds: map[string]string{"tmdb": "9"}},
-		Qualities:   []*pluginv1.RequestedQuality{{Id: "1080p", Is4K: false}, {Id: "2160p", Is4K: true}},
-		Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
-	})
-	if len(resp.GetTargets()) != 2 {
-		t.Fatalf("want 2 targets, got %d", len(resp.GetTargets()))
-	}
-	if stub.bodies[0]["is4k"] != false || stub.bodies[1]["is4k"] != true {
-		t.Fatalf("is4k mapping wrong: %+v %+v", stub.bodies[0], stub.bodies[1])
-	}
-	if stub.bodies[0]["mediaType"] != "tv" || stub.bodies[0]["seasons"] != "all" {
-		t.Fatalf("series should map to tv + seasons all: %+v", stub.bodies[0])
-	}
-}
-
-func TestFulfill4KSkippedWhenUnsupported(t *testing.T) {
+// A Seerr with a separate 4K server gets one request per quality, and the 4K
+// one is a 4K request.
+func TestFulfillSendsOneRequestPerQualityToSeparate4KServer(t *testing.T) {
 	stub := &seerrStub{}
 	srv := httptest.NewServer(stub.handler(t))
 	defer srv.Close()
@@ -108,13 +89,51 @@ func TestFulfill4KSkippedWhenUnsupported(t *testing.T) {
 	resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
 		Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "9"}},
 		Qualities:   []*pluginv1.RequestedQuality{{Id: "1080p", Is4K: false}, {Id: "2160p", Is4K: true}},
-		Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, false)},
+		Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
 	})
-	if len(resp.GetTargets()) != 1 || resp.GetTargets()[0].GetQuality() != "1080p" {
-		t.Fatalf("4k should be skipped, got %d targets", len(resp.GetTargets()))
+	if len(stub.bodies) != 2 || stub.bodies[0]["is4k"] != false || stub.bodies[1]["is4k"] != true {
+		t.Fatalf("want a standard and a 4K request, got %+v", stub.bodies)
 	}
-	if len(stub.bodies) != 1 {
-		t.Fatalf("only the HD request should be sent, got %d", len(stub.bodies))
+	got := resp.GetTargets()
+	if len(got) != 2 || got[0].GetQuality() != "1080p" || got[1].GetQuality() != "2160p" || got[0].GetExternalId() == got[1].GetExternalId() {
+		t.Fatalf("want one target per quality, each with its own request: %v", got)
+	}
+}
+
+// A Radarr or Sonarr holds one copy of a title, so without a separate 4K
+// server HD and 4K are answered by the same standard Seerr request.
+func TestFulfillAnswersEveryQualityWithOneStandardRequest(t *testing.T) {
+	for _, legacy := range []bool{false} {
+		stub := &seerrStub{}
+		srv := httptest.NewServer(stub.handler(t))
+
+		resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
+			Request:     &pluginv1.RequestDescriptor{MediaType: "series", ExternalIds: map[string]string{"tmdb": "9"}},
+			Qualities:   []*pluginv1.RequestedQuality{{Id: "1080p", Is4K: false}, {Id: "2160p", Is4K: true}},
+			Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, legacy)},
+		})
+		srv.Close()
+		if len(stub.bodies) != 1 {
+			t.Fatalf("want one Seerr request, got %d", len(stub.bodies))
+		}
+		body := stub.bodies[0]
+		if body["is4k"] != false || body["mediaType"] != "tv" || body["seasons"] != "all" {
+			t.Fatalf("want a standard tv request for all seasons: %+v", body)
+		}
+		for _, key := range []string{"serverId", "profileId", "rootFolder"} {
+			if _, ok := body[key]; ok {
+				t.Fatalf("%s must be left to Seerr when not configured: %+v", key, body)
+			}
+		}
+		got := resp.GetTargets()
+		if len(got) != 2 || got[0].GetQuality() != "1080p" || got[1].GetQuality() != "2160p" {
+			t.Fatalf("want one target per quality, got %v", got)
+		}
+		for _, target := range got {
+			if target.GetStatus() != "queued" || target.GetConnectionId() != "c1" || target.GetExternalId() == "" || target.GetExternalId() != got[0].GetExternalId() {
+				t.Fatalf("every quality should follow the one request: %v", got)
+			}
+		}
 	}
 }
 
@@ -185,9 +204,11 @@ func TestFulfillEmptyBodyRecoversID(t *testing.T) {
 
 func TestFulfillRecoversRequestOutsideRecentPage(t *testing.T) {
 	for _, mediaType := range []string{"movie", "series"} {
-		for _, is4k := range []bool{false, true} {
+		// A 4K quality is answered by the standard request too.
+		for _, wants4K := range []bool{false, true} {
+			const is4k = false
 			for _, createStatus := range []int{http.StatusConflict, http.StatusCreated, http.StatusAccepted} {
-				t.Run(fmt.Sprintf("%s/4k=%t/status=%d", mediaType, is4k, createStatus), func(t *testing.T) {
+				t.Run(fmt.Sprintf("%s/4k=%t/status=%d", mediaType, wants4K, createStatus), func(t *testing.T) {
 					apiType := mediaType
 					if mediaType == "series" {
 						apiType = "tv"
@@ -226,17 +247,14 @@ func TestFulfillRecoversRequestOutsideRecentPage(t *testing.T) {
 
 					resp, err := New().Fulfill(t.Context(), &pluginv1.FulfillRequest{
 						Request:     &pluginv1.RequestDescriptor{MediaType: mediaType, ExternalIds: map[string]string{"tmdb": "42"}},
-						Qualities:   []*pluginv1.RequestedQuality{{Id: "test-tier", Is4K: is4k}},
-						Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+						Qualities:   []*pluginv1.RequestedQuality{{Id: "test-tier", Is4K: wants4K}},
+						Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, false)},
 					})
 					if err != nil || len(resp.GetTargets()) != 1 {
 						t.Fatalf("Fulfill: response=%v err=%v", resp, err)
 					}
 					target := resp.GetTargets()[0]
-					wantStatus := "5"
-					if is4k {
-						wantStatus = "3"
-					}
+					const wantStatus = "5"
 					if target.GetStatus() != "queued" || target.GetExternalId() != "18" || target.GetExternalStatus() != wantStatus {
 						t.Fatalf("want queued request 18 with tier status %s, got %v", wantStatus, target)
 					}
@@ -246,9 +264,40 @@ func TestFulfillRecoversRequestOutsideRecentPage(t *testing.T) {
 	}
 }
 
-// A 4K target's external status is the media's status4k, on both the create
-// and the duplicate-recovery paths; the HD tier's status is available here.
-func TestFulfill4KExternalStatusReadsStatus4K(t *testing.T) {
+// With a separate 4K server, a duplicate 4K request recovers the request
+// Seerr holds for its 4K tier, with that tier's status.
+func TestFulfill4KQualityRecovers4KRequestOnSeparateServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/request" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusConflict)
+		case r.URL.Path == "/api/v1/request" && r.Method == http.MethodGet:
+			w.Write([]byte(`{"results":[
+				{"id":63,"is4k":true,"media":{"mediaType":"movie","tmdbId":42,"status":3,"status4k":5}},
+				{"id":62,"is4k":false,"media":{"mediaType":"movie","tmdbId":42,"status":3,"status4k":5}}]}`))
+		default:
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
+		Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "42"}},
+		Qualities:   []*pluginv1.RequestedQuality{{Id: "2160p", Is4K: true}},
+		Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+	})
+	if len(resp.GetTargets()) != 1 {
+		t.Fatalf("want 1 target, got %d", len(resp.GetTargets()))
+	}
+	if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "queued" || tgt.GetExternalId() != "63" || tgt.GetExternalStatus() != "5" {
+		t.Fatalf("want queued 4K request 63 with external status 5, got %+v", tgt)
+	}
+}
+
+// Without a separate 4K server a 4K quality follows the standard request, so
+// its external status is the media's standard status, on both the create and
+// the duplicate-recovery paths. Requests Seerr holds for its 4K tier are not
+// picked up.
+func TestFulfill4KQualityReadsTheStandardRequest(t *testing.T) {
 	for _, dup := range []bool{false, true} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
@@ -256,9 +305,11 @@ func TestFulfill4KExternalStatusReadsStatus4K(t *testing.T) {
 				w.WriteHeader(http.StatusConflict)
 			case r.URL.Path == "/api/v1/request" && r.Method == http.MethodPost:
 				w.WriteHeader(http.StatusCreated)
-				w.Write([]byte(`{"id":61,"status":2,"is4k":true,"media":{"mediaType":"movie","tmdbId":42,"status":5,"status4k":2}}`))
+				w.Write([]byte(`{"id":61,"status":2,"is4k":false,"media":{"mediaType":"movie","tmdbId":42,"status":2,"status4k":5}}`))
 			case r.URL.Path == "/api/v1/request" && r.Method == http.MethodGet:
-				w.Write([]byte(`{"results":[{"id":62,"is4k":true,"media":{"mediaType":"movie","tmdbId":42,"status":5,"status4k":3}}]}`))
+				w.Write([]byte(`{"results":[
+					{"id":63,"is4k":true,"media":{"mediaType":"movie","tmdbId":42,"status":3,"status4k":5}},
+					{"id":62,"is4k":false,"media":{"mediaType":"movie","tmdbId":42,"status":3,"status4k":5}}]}`))
 			default:
 				http.Error(w, "unexpected", http.StatusNotFound)
 			}
@@ -266,30 +317,32 @@ func TestFulfill4KExternalStatusReadsStatus4K(t *testing.T) {
 		resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
 			Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "42"}},
 			Qualities:   []*pluginv1.RequestedQuality{{Id: "2160p", Is4K: true}},
-			Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, true)},
+			Connections: []*pluginv1.RouterConnection{conn(t, "c1", srv.URL, false)},
 		})
 		srv.Close()
-		want := "2"
+		wantID, wantStatus := "61", "2"
 		if dup {
-			want = "3"
+			wantID, wantStatus = "62", "3"
 		}
 		if len(resp.GetTargets()) != 1 {
 			t.Fatalf("dup=%t: want 1 target, got %d", dup, len(resp.GetTargets()))
 		}
-		if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "queued" || tgt.GetExternalStatus() != want {
-			t.Fatalf("dup=%t: want queued with external status %s, got %+v", dup, want, tgt)
+		if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "queued" || tgt.GetExternalId() != wantID || tgt.GetExternalStatus() != wantStatus {
+			t.Fatalf("dup=%t: want queued request %s with external status %s, got %+v", dup, wantID, wantStatus, tgt)
 		}
 	}
 }
 
 func TestFulfillZeroTargetsReturnsMessage(t *testing.T) {
-	resp, _ := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
-		Request:     &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "42"}},
-		Qualities:   []*pluginv1.RequestedQuality{{Id: "2160p", Is4K: true}},
-		Connections: []*pluginv1.RouterConnection{conn(t, "c1", "http://unused", false)},
-	})
-	if len(resp.GetTargets()) != 0 || resp.GetMessage() == "" {
-		t.Fatalf("want zero targets + a message, got %d targets msg=%q", len(resp.GetTargets()), resp.GetMessage())
+	for name, req := range map[string]*pluginv1.FulfillRequest{
+		"no connection": {Qualities: []*pluginv1.RequestedQuality{{Id: "1080p"}}},
+		"no quality":    {Connections: []*pluginv1.RouterConnection{conn(t, "c1", "http://unused", false)}},
+	} {
+		req.Request = &pluginv1.RequestDescriptor{MediaType: "movie", ExternalIds: map[string]string{"tmdb": "42"}}
+		resp, _ := New().Fulfill(context.Background(), req)
+		if len(resp.GetTargets()) != 0 || resp.GetMessage() == "" {
+			t.Fatalf("%s: want zero targets + a message, got %d targets msg=%q", name, len(resp.GetTargets()), resp.GetMessage())
+		}
 	}
 }
 
@@ -743,17 +796,19 @@ func TestFulfillMappedCreatesMissingUserWithPermissions(t *testing.T) {
 	}
 }
 
-func TestFulfillMappedGrants4KWhenRequestHas4K(t *testing.T) {
+// Requests are standard requests whatever quality Silo asks for, so a created
+// user needs no 4K permission.
+func TestFulfillMappedGrantsNo4KPermissions(t *testing.T) {
 	var createBody map[string]any
 	srv := newUserCreateStub(t, &createBody, `{"id":99}`)
 	defer srv.Close()
 
-	cfg, _ := structpb.NewStruct(map[string]any{"requester_mode": "mapped", "auto_approve": true, "supports_4k": true})
+	cfg, _ := structpb.NewStruct(map[string]any{"requester_mode": "mapped", "auto_approve": true})
 	mustFulfill(t, srv.URL, cfg, []*pluginv1.RequestedQuality{{Id: "1080p"}, {Id: "2160p", Is4K: true}})
 
-	want := seerr.PermRequest | seerr.PermRequest4K | seerr.PermAutoApprove | seerr.PermAutoApprove4K
+	want := seerr.PermRequest | seerr.PermAutoApprove
 	if got := int(createBody["permissions"].(float64)); got != want {
-		t.Fatalf("permissions = %d, want %d (incl 4K)", got, want)
+		t.Fatalf("permissions = %d, want %d (REQUEST|AUTO_APPROVE)", got, want)
 	}
 }
 
